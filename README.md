@@ -43,6 +43,19 @@ Verify the command-line entry point:
 .\.venv\Scripts\python.exe -m gpw.cli --help
 ```
 
+Record a short WAV from the default microphone:
+
+```powershell
+.\.venv\Scripts\python.exe -m gpw.cli --config app/config.example.yaml record-audio --duration 3
+```
+
+The audio file is saved to the configured `audio_dir`, which defaults to
+`C:\GhostPepperWindows\audio`.
+
+To test the AutoHotkey trigger, run `app\scripts\hotkey.ahk` with AutoHotkey v2
+and press `Ctrl+Alt+Space`. The current MVP hotkey records audio only; clipboard
+paste is added in a later phase after transcription and cleanup are proven.
+
 Run the included tests:
 
 ```powershell

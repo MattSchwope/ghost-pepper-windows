@@ -25,4 +25,4 @@ try {
 
 Write-Host "Setup complete."
 Write-Host "Try: .\.venv\Scripts\python.exe -m gpw.cli --help"
-Write-Host "Then: .\.venv\Scripts\python.exe -m gpw.cli --config app\config.example.yaml record-once --duration 5"
+Write-Host "Then: .\.venv\Scripts\python.exe -m gpw.cli --config app\config.example.yaml record-audio --duration 5"

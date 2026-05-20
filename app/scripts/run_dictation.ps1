@@ -1,9 +1,8 @@
-# Run one fixed-duration dictation pipeline.
-# Called by AutoHotkey during MVP phase.
+# Run one fixed-duration microphone recording.
+# Called by AutoHotkey during the first MVP audio phase.
 
 param(
-    [int]$Duration = 8,
-    [string]$Profile = "general_cleanup"
+    [int]$Duration = 8
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +10,10 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $RepoRoot
 
-$env:PYTHONPATH = "$RepoRoot\app\src"
+$PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) {
+    $PythonExe = "python"
+}
 
-.\.venv\Scripts\python.exe -m gpw.cli --config app\config.example.yaml record-once --duration $Duration --profile $Profile
+& $PythonExe -m gpw.cli --config app\config.example.yaml record-audio --duration $Duration
+exit $LASTEXITCODE

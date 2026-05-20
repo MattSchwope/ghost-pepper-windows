@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -17,11 +18,39 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--duration", type=int, default=None, help="Recording duration in seconds")
     rec.add_argument("--profile", default=None, help="Prompt profile name")
 
+    audio = subparsers.add_parser("record-audio", help="Record mic audio to a local WAV file")
+    audio.add_argument("--duration", type=int, default=None, help="Recording duration in seconds")
+
     trans = subparsers.add_parser("transcribe-file", help="Transcribe an existing audio file")
     trans.add_argument("audio_path")
     trans.add_argument("--profile", default=None, help="Prompt profile name")
 
     return parser
+
+
+def run_record_audio(config_path: str, duration: int | None) -> int:
+    from .config import ensure_directories, load_config
+    from .logging_setup import configure_logging
+    from .recorder import record_wav
+
+    config = load_config(config_path)
+    ensure_directories(config)
+    configure_logging(config.logs_dir)
+
+    try:
+        audio_path = record_wav(
+            audio_dir=config.audio_dir,
+            duration_seconds=config.default_duration_seconds if duration is None else duration,
+            sample_rate=config.sample_rate,
+            channels=config.channels,
+        )
+    except Exception as exc:
+        logger.exception("Audio recording failed.")
+        print(f"Audio recording failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Saved audio: {audio_path}")
+    return 0
 
 
 def run_pipeline(config_path: str, audio_path: Path | None, duration: int | None, profile: str | None) -> int:
@@ -43,7 +72,7 @@ def run_pipeline(config_path: str, audio_path: Path | None, duration: int | None
     if audio_path is None:
         audio_path = record_wav(
             audio_dir=config.audio_dir,
-            duration_seconds=duration or config.default_duration_seconds,
+            duration_seconds=config.default_duration_seconds if duration is None else duration,
             sample_rate=config.sample_rate,
             channels=config.channels,
         )
@@ -95,6 +124,9 @@ def main() -> None:
 
     if args.command == "record-once":
         raise SystemExit(run_pipeline(args.config, None, args.duration, args.profile))
+
+    if args.command == "record-audio":
+        raise SystemExit(run_record_audio(args.config, args.duration))
 
     if args.command == "transcribe-file":
         raise SystemExit(run_pipeline(args.config, Path(args.audio_path), None, args.profile))
