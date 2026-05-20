@@ -27,6 +27,32 @@ Later phases can add:
 4. Build Phase 1 first before touching meeting transcription.
 5. Do not add cloud services unless explicitly requested.
 
+## Repo bootstrap
+
+From the repo root, create a virtual environment and install the package in editable mode:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+```
+
+Verify the command-line entry point:
+
+```powershell
+.\.venv\Scripts\python.exe -m gpw.cli --help
+```
+
+Run the included tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+The default config lives at `app/config.example.yaml`. It keeps app data under
+`C:\GhostPepperWindows` and uses local services only, including Ollama on
+`http://localhost:11434`.
+
 ## MVP success definition
 
 The MVP is complete when:
