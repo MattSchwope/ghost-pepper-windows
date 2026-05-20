@@ -13,7 +13,7 @@ python -m venv .venv
 
 Write-Host "Installing Python dependencies..."
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\pip.exe install -r app\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
 
 Write-Host "Checking Ollama..."
 try {
@@ -24,4 +24,5 @@ try {
 }
 
 Write-Host "Setup complete."
-Write-Host "Try: .\.venv\Scripts\python.exe -m gpw.cli --config app\config.example.yaml record-once --duration 5"
+Write-Host "Try: .\.venv\Scripts\python.exe -m gpw.cli --help"
+Write-Host "Then: .\.venv\Scripts\python.exe -m gpw.cli --config app\config.example.yaml record-once --duration 5"

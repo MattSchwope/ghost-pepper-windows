@@ -4,14 +4,6 @@ import argparse
 import logging
 from pathlib import Path
 
-from .config import load_config, ensure_directories
-from .logging_setup import configure_logging
-from .recorder import record_wav
-from .transcriber import FasterWhisperTranscriber
-from .cleaner import OllamaCleaner, load_prompt
-from .clipboard import copy_text
-from .markdown_store import save_dictation_note
-
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +25,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_pipeline(config_path: str, audio_path: Path | None, duration: int | None, profile: str | None) -> int:
+    from .cleaner import OllamaCleaner, load_prompt
+    from .clipboard import copy_text
+    from .config import ensure_directories, load_config
+    from .logging_setup import configure_logging
+    from .markdown_store import save_dictation_note
+    from .recorder import record_wav
+    from .transcriber import FasterWhisperTranscriber
+
     config = load_config(config_path)
     ensure_directories(config)
     configure_logging(config.logs_dir)
