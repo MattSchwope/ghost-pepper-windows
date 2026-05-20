@@ -1,0 +1,40 @@
+app:
+  data_dir: "C:/GhostPepperWindows"
+  audio_dir: "C:/GhostPepperWindows/audio"
+  notes_dir: "C:/GhostPepperWindows/notes"
+  logs_dir: "C:/GhostPepperWindows/logs"
+
+recording:
+  sample_rate: 16000
+  channels: 1
+  default_duration_seconds: 8
+  input_device: null
+
+transcription:
+  backend: "faster-whisper"
+  model_size: "small.en"
+  device: "cpu"
+  compute_type: "int8"
+  language: "en"
+  vad_filter: true
+
+cleanup:
+  enabled: true
+  backend: "ollama"
+  ollama_url: "http://localhost:11434/api/chat"
+  model: "qwen2.5:3b"
+  prompt_profile: "general_cleanup"
+  timeout_seconds: 120
+
+clipboard:
+  copy_result: true
+  paste_after_copy: true
+
+markdown:
+  save_notes: true
+  include_raw_transcript: true
+  include_cleaned_text: true
+
+privacy:
+  debug_log_transcripts: false
+  delete_audio_after_success: false
