@@ -46,14 +46,19 @@ def discover_clips(clips_dir: Path) -> tuple[list[Clip], list[Path]]:
     missing: list[Path] = []
     if not clips_dir.is_dir():
         return clips, missing
+    taken: dict[str, Path] = {}
     for path in sorted(clips_dir.iterdir()):
         if path.suffix.lower() not in AUDIO_EXTS:
             continue
         ref = path.with_name(f"{path.stem}.ref.txt")
-        if ref.is_file():
-            clips.append(Clip(path, ref))
-        else:
+        if not ref.is_file():
             missing.append(path)
+        elif path.stem.lower() in taken:
+            # Results and cached hypotheses are keyed by name, and both files would share one reference.
+            logger.warning("Skipping %s: %s already uses %s. Rename one of them.", path.name, taken[path.stem.lower()].name, ref.name)
+        else:
+            taken[path.stem.lower()] = path
+            clips.append(Clip(path, ref))
     return clips, missing
 
 

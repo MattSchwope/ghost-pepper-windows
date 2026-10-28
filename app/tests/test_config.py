@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from gpw.config import DEFAULT_CONFIG, load_config, parse_config
 
@@ -44,7 +45,15 @@ def test_bad_input_device_rejected(value):
         parse_config({"recording": {"input_device": value}})
 
 
+def test_bare_off_audio_prep_in_yaml_means_off():
+    raw = yaml.safe_load("transcription:\n  audio_prep: off\n")
+    assert raw["transcription"]["audio_prep"] is False
+    assert parse_config(raw).audio_prep == "off"
+
+
 def test_bad_audio_prep_rejected():
+    with pytest.raises(ValueError, match="audio_prep"):
+        parse_config({"transcription": {"audio_prep": True}})
     with pytest.raises(ValueError, match="audio_prep"):
         parse_config({"transcription": {"audio_prep": "extreme"}})
 

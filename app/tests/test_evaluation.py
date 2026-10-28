@@ -46,6 +46,16 @@ def test_discover_clips(tmp_path):
     assert discover_clips(tmp_path / "absent") == ([], [])
 
 
+def test_discover_clips_skips_second_file_with_same_name(tmp_path, caplog):
+    for name in ("talk-01.wav", "Talk-01.mp3"):
+        (tmp_path / name).write_bytes(b"x")
+    (tmp_path / "talk-01.ref.txt").write_text("hi", encoding="utf-8")
+    (tmp_path / "Talk-01.ref.txt").write_text("hi", encoding="utf-8")
+    clips, missing = discover_clips(tmp_path)
+    assert len(clips) == 1 and missing == []
+    assert "Rename one of them" in caplog.text
+
+
 def test_parse_prep_list():
     allowed = ("off", "light", "strong")
     assert parse_prep_list("off, light,off", allowed) == ["off", "light"]

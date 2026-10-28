@@ -78,7 +78,10 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         max_retries=int(oa.get("max_retries", defaults.max_retries)),
     )
 
-    audio_prep = str(transcription.get("audio_prep", "light"))
+    audio_prep = transcription.get("audio_prep", "light")
+    if audio_prep is False:  # YAML 1.1 reads a bare `off` as false
+        audio_prep = "off"
+    audio_prep = str(audio_prep)
     if audio_prep not in PREP_LEVELS:
         raise ValueError(f"transcription.audio_prep must be one of {', '.join(PREP_LEVELS)}; got '{audio_prep}'")
     chunk_minutes = int(transcription.get("chunk_minutes", 10))
