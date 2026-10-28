@@ -55,6 +55,18 @@ def _engine(config: AppConfig):
     return OpenAIEngine(make_client(config.openai), config.openai.transcribe_model)
 
 
+def _cue(message: str, beep_hz: int) -> None:
+    """Show and sound a recording cue. Goes to stderr so stdout stays transcript-only."""
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+    try:
+        import winsound
+
+        winsound.Beep(beep_hz, 150)
+    except (ImportError, RuntimeError):
+        pass
+
+
 def run_pipeline(
     config: AppConfig,
     audio_path: Path | None,
@@ -72,12 +84,16 @@ def run_pipeline(
     if recorded:
         from .recorder import record_wav
 
+        seconds = duration or config.default_duration_seconds
         audio_path = record_wav(
             audio_dir=config.audio_dir,
-            duration_seconds=duration or config.default_duration_seconds,
+            duration_seconds=seconds,
             sample_rate=config.sample_rate,
             channels=config.channels,
+            device=config.input_device,
+            on_start=lambda: _cue(f"\n>>> LISTENING for {seconds} seconds. Speak now...", 880),
         )
+        _cue(">>> Done listening. Transcribing...\n", 440)
 
     engine = _engine(config)
     transcript = transcribe_file(

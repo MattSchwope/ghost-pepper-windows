@@ -33,6 +33,7 @@ class AppConfig:
     sample_rate: int
     channels: int
     default_duration_seconds: int
+    input_device: int | str | None
     openai: OpenAIConfig
     languages: list[str]
     audio_prep: str
@@ -84,6 +85,10 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     if not 2 <= chunk_minutes <= 40:
         raise ValueError(f"transcription.chunk_minutes must be between 2 and 40; got {chunk_minutes}")
 
+    input_device = recording.get("input_device")
+    if isinstance(input_device, bool) or not isinstance(input_device, (int, str, type(None))):
+        raise ValueError(f"recording.input_device must be null, a mic name or an index; got '{input_device}'")
+
     data_dir = Path(app.get("data_dir", "C:/GhostPepperWindows"))
     return AppConfig(
         data_dir=data_dir,
@@ -93,6 +98,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         sample_rate=int(recording.get("sample_rate", 16000)),
         channels=int(recording.get("channels", 1)),
         default_duration_seconds=int(recording.get("default_duration_seconds", 8)),
+        input_device=input_device,
         openai=openai_cfg,
         languages=_str_list(transcription.get("languages", ["en"])),
         audio_prep=audio_prep,

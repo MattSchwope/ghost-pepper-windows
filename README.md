@@ -54,7 +54,7 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 |---|---|
 | `gpw transcribe-file clip.m4a` | Prints the transcript from GPT-Transcribe. Long files are cut at pauses into ~10 minute chunks. `--prep off\|light\|strong`, `--context "one line on the topic"` |
 | `gpw eval --prep off,light,strong` | Runs every clip in `eval/clips/` at each prep level and prints a WER table. Hypotheses are cached in `eval/results/`; `--fresh` redoes them |
-| `gpw record-once --duration 8` | Records a fixed-length clip, transcribes it and copies the text. Replaced by hold-to-talk in Phase 1 |
+| `gpw record-once --duration 8` | Beeps, records for that many seconds, beeps again, then transcribes and copies the text. Uses the Windows default mic unless `recording.input_device` names another. Replaced by hold-to-talk in Phase 1 |
 
 The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
 

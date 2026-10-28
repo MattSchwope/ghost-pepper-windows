@@ -1,13 +1,15 @@
 """CLI end-to-end with the OpenAI engine mocked. No network calls."""
 
 import re
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import soundfile as sf
 
-from gpw import cli, logging_setup
+from gpw import cli, clipboard, logging_setup, recorder
 from gpw.config import REPO_ROOT
 
 
@@ -53,6 +55,29 @@ def test_transcribe_file_missing_audio_fails_clearly(tmp_path, config_file, caps
         cli.main(["--config", str(config_file), "transcribe-file", str(tmp_path / "nope.m4a")])
     assert exit_info.value.code == 1
     assert "Audio file not found" in capsys.readouterr().err + caplog.text
+
+
+def test_record_once_cues_and_uses_configured_mic(tmp_path, config_file, monkeypatch, capsys):
+    beeps, calls, copied = [], {}, []
+    monkeypatch.setitem(sys.modules, "winsound", SimpleNamespace(Beep=lambda hz, ms: beeps.append(hz)))
+
+    def fake_record_wav(audio_dir, duration_seconds, sample_rate, channels, device, on_start):
+        calls.update(device=device, seconds=duration_seconds)
+        on_start()
+        return _tone(tmp_path / "rec.wav")
+
+    monkeypatch.setattr(recorder, "record_wav", fake_record_wav)
+    monkeypatch.setattr(clipboard, "copy_text", copied.append)
+    config_file.write_text(config_file.read_text() + 'recording:\n  input_device: "USB Condenser"\n')
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "record-once", "--duration", "3"])
+    assert exit_info.value.code == 0
+    err = capsys.readouterr().err
+    assert err.index("LISTENING for 3 seconds") < err.index("Done listening")
+    assert beeps == [880, 440]
+    assert calls == {"device": "USB Condenser", "seconds": 3}
+    assert copied == ["Hello from the fake engine."]
 
 
 def test_eval_prints_wer_table(tmp_path, config_file, capsys):

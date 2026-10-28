@@ -33,6 +33,17 @@ def test_keywords_accept_comma_string():
     assert config.keywords == ["Kavaliro", "SOCOM"]
 
 
+@pytest.mark.parametrize("value", [None, 3, "Poly BT700"])
+def test_input_device_accepts_default_index_or_name(value):
+    assert parse_config({"recording": {"input_device": value}}).input_device == value
+
+
+@pytest.mark.parametrize("value", [True, 1.5, ["mic"]])
+def test_bad_input_device_rejected(value):
+    with pytest.raises(ValueError, match="input_device"):
+        parse_config({"recording": {"input_device": value}})
+
+
 def test_bad_audio_prep_rejected():
     with pytest.raises(ValueError, match="audio_prep"):
         parse_config({"transcription": {"audio_prep": "extreme"}})

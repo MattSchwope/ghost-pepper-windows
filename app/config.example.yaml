@@ -8,7 +8,7 @@ recording:
   sample_rate: 16000
   channels: 1
   default_duration_seconds: 8
-  input_device: null
+  input_device: null       # null = Windows default mic, or part of a mic's name such as "Poly BT700"
 
 # The only cloud service. The key is read from .env or the environment, never from here.
 openai:
