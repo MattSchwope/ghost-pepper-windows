@@ -6,6 +6,16 @@ A Wispr Flow replacement for Windows, plus a long-recording-to-Markdown pipeline
 
 **Drop a recording in the inbox → transcript + profile summary → Markdown note**
 
+## Quick start (Windows)
+
+Paste this into PowerShell from any folder. It installs what's missing, clones this repo to your user folder, asks for your OpenAI key once, and starts Claude Code on the next phase:
+
+```powershell
+irm https://raw.githubusercontent.com/MattSchwope/ghost-pepper-windows/main/kickstart.ps1 | iex
+```
+
+Run the same line any time to update and keep building. Every step skips what is already done.
+
 ## Start here
 
 1. Read `docs/BUILD_PLAN.md`. It is the source of truth for scope and phase order.
