@@ -84,7 +84,8 @@ function Resolve-RepoDir {
             }
         }
     }
-    if ($env:GPW_REPO_DIR) { return $env:GPW_REPO_DIR }
+    # Resolved against where you are now, so a relative or ~ path is saved as a full path.
+    if ($env:GPW_REPO_DIR) { return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:GPW_REPO_DIR) }
     return $DefaultRepoDir
 }
 
