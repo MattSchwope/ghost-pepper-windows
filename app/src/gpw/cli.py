@@ -143,7 +143,8 @@ def run_pipeline(
             audio_path=audio_path,
             profile=prompt_profile,
         )
-        logger.info("Saved Markdown note: %s", note_path)
+        # The file name is built from the transcript, so it is logged only when transcripts may be.
+        logger.info("Saved Markdown note: %s", note_path if config.debug_log_transcripts else note_path.parent)
 
     if recorded and config.delete_audio_after_success:
         audio_path.unlink(missing_ok=True)

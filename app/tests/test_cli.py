@@ -1,5 +1,6 @@
 """CLI end-to-end with the OpenAI engine mocked. No network calls."""
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -48,6 +49,15 @@ def test_transcribe_file_prints_text_and_saves_note(tmp_path, config_file, capsy
     assert capsys.readouterr().out.strip() == "Hello from the fake engine."
     notes = list((tmp_path / "data" / "notes").glob("*.md"))
     assert len(notes) == 1
+
+
+def test_note_file_name_stays_out_of_logs(tmp_path, config_file, caplog):
+    # The note is named after its first words; logging that name would leak the transcript.
+    caplog.set_level(logging.INFO)
+    with pytest.raises(SystemExit):
+        cli.main(["--config", str(config_file), "transcribe-file", str(_tone(tmp_path / "clip.wav"))])
+    assert "Saved Markdown note" in caplog.text
+    assert "fake" not in caplog.text.lower()
 
 
 def test_transcribe_file_missing_audio_fails_clearly(tmp_path, config_file, capsys, caplog):

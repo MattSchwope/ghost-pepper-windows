@@ -121,7 +121,7 @@ files:
 **Matt's homework:** collect 15 short clips (30 to 60 seconds) in `eval/clips/` (git-ignored). Include 5 noisy dictations, 5 cuts from recorded talks and 5 from phone calls. Add a hand-corrected `.ref.txt` for each.
 
 **Done when**
-- [ ] `gpw transcribe-file clip.m4a` returns text through GPT-Transcribe.
+- [x] `gpw transcribe-file clip.m4a` returns text through GPT-Transcribe. Proven live by Matt on October 28, 2026 with `gpw record-once`, which runs the same prep and GPT-Transcribe path.
 - [x] `gpw eval --prep off,light,strong` prints a WER table.
 - [x] Tests pass. No Ollama references remain.
 
