@@ -8,13 +8,15 @@ A Wispr Flow replacement for Windows, plus a long-recording-to-Markdown pipeline
 
 ## Quick start (Windows)
 
-Paste this into PowerShell from any folder. It installs what's missing, clones this repo to your user folder, asks for your OpenAI key once, and starts Claude Code on the next phase:
+Paste this into PowerShell from any folder. It installs what's missing, clones this repo to your user folder (or updates your existing clone), asks for your OpenAI key once, and starts Claude Code on the next phase:
 
 ```powershell
 irm https://raw.githubusercontent.com/MattSchwope/ghost-pepper-windows/main/kickstart.ps1 | iex
 ```
 
 Run the same line any time to update and keep building. Every step skips what is already done.
+
+To keep the repo somewhere else, run the line once from inside your clone, or set `GPW_REPO_DIR` to the folder first. The folder is saved to `GPW_REPO_DIR`, so later runs from any folder use it.
 
 ## Start here
 

@@ -4,15 +4,20 @@ Ghost Pepper Windows kickstart. Run this one line in PowerShell, from any folder
   irm https://raw.githubusercontent.com/MattSchwope/ghost-pepper-windows/main/kickstart.ps1 | iex
 
 It installs whatever is missing (Git, Python, GitHub CLI, AutoHotkey v2, Claude Code),
-logs GitHub in, clones or updates the repo in your user folder, sets up Python, saves
-your OpenAI key to .env, then starts Claude Code building the next phase.
+logs GitHub in, clones or updates the repo, sets up Python, saves your OpenAI key
+to .env, then starts Claude Code building the next phase.
 Safe to re-run any time: every step skips what is already done.
+
+Where the repo goes: run it from inside an existing clone to use that one, or set
+GPW_REPO_DIR to a folder first. Otherwise it clones to ghost-pepper-windows in your
+user folder. The folder it used is saved to GPW_REPO_DIR, so later runs from any
+folder find it again.
 #>
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $RepoUrl = 'https://github.com/MattSchwope/ghost-pepper-windows'
-$RepoDir = Join-Path $HOME 'ghost-pepper-windows'
+$DefaultRepoDir = Join-Path $HOME 'ghost-pepper-windows'
 $GitName = 'Matt Schwope'
 $GitEmail = '205084476+MattSchwope@users.noreply.github.com'
 
@@ -64,6 +69,23 @@ function Find-AutoHotkey {
     )
     foreach ($p in $paths) { if (Test-Path $p) { return $p } }
     return $null
+}
+
+function Resolve-RepoDir {
+    # First match wins: the clone you are standing in, then GPW_REPO_DIR, then the default.
+    $ErrorActionPreference = 'Continue'
+    $slug = [regex]::Escape(([Uri]$RepoUrl).AbsolutePath.Trim('/'))
+    if ($PWD.Provider.Name -eq 'FileSystem') {
+        $top = git -C $PWD.ProviderPath rev-parse --show-toplevel 2>$null
+        if ($LASTEXITCODE -eq 0 -and $top) {
+            $origin = git -C $top remote get-url origin 2>$null
+            if ($LASTEXITCODE -eq 0 -and $origin -match "[:/]$slug(\.git)?/?$") {
+                return [IO.Path]::GetFullPath($top)
+            }
+        }
+    }
+    if ($env:GPW_REPO_DIR) { return $env:GPW_REPO_DIR }
+    return $DefaultRepoDir
 }
 
 function Test-OpenAIKey([string]$Key) {
@@ -150,6 +172,7 @@ function Invoke-Kickstart {
     $ErrorActionPreference = 'Stop'
     Ok 'Logged in to GitHub'
 
+    $RepoDir = Resolve-RepoDir
     Step "Getting the repo into $RepoDir"
     $ErrorActionPreference = 'Continue'
     if (Test-Path (Join-Path $RepoDir '.git')) {
@@ -167,6 +190,11 @@ function Invoke-Kickstart {
     git -C $RepoDir config user.email $GitEmail
     $ErrorActionPreference = 'Stop'
     Ok 'Commits will use your GitHub noreply email'
+    if ([Environment]::GetEnvironmentVariable('GPW_REPO_DIR', 'User') -ne $RepoDir) {
+        [Environment]::SetEnvironmentVariable('GPW_REPO_DIR', $RepoDir, 'User')
+        $env:GPW_REPO_DIR = $RepoDir
+        Ok 'Saved this folder to GPW_REPO_DIR for next time'
+    }
 
     Step 'Saving your OpenAI key'
     $envPath = Join-Path $RepoDir '.env'
