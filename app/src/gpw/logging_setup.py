@@ -16,3 +16,5 @@ def configure_logging(logs_dir: Path) -> None:
             logging.StreamHandler(),
         ],
     )
+    # Request lines from the HTTP client add noise without stage timings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

@@ -15,14 +15,15 @@ Write-Host "Installing Python dependencies..."
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[test]"
 
-Write-Host "Checking Ollama..."
-try {
-    $response = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -UseBasicParsing -TimeoutSec 5
-    Write-Host "Ollama is reachable."
-} catch {
-    Write-Warning "Ollama is not reachable at http://localhost:11434. Install/start Ollama and run: ollama pull qwen2.5:3b"
+Write-Host "Checking OpenAI key..."
+if ((Test-Path ".env") -and (Select-String -Path ".env" -Pattern "^OPENAI_API_KEY=sk-[^.]" -Quiet)) {
+    Write-Host "OPENAI_API_KEY found in .env."
+} elseif ($env:OPENAI_API_KEY) {
+    Write-Host "OPENAI_API_KEY found in the environment."
+} else {
+    Write-Warning "No OpenAI key found. Copy .env.example to .env and paste your key."
 }
 
 Write-Host "Setup complete."
-Write-Host "Try: .\.venv\Scripts\python.exe -m gpw.cli --help"
-Write-Host "Then: .\.venv\Scripts\python.exe -m gpw.cli --config app\config.example.yaml record-once --duration 5"
+Write-Host "Try: .\.venv\Scripts\gpw.exe --help"
+Write-Host "Then: .\.venv\Scripts\gpw.exe transcribe-file path\to\clip.m4a"

@@ -1,14 +1,17 @@
-"""Audio cleanup and silence-aware chunking with ffmpeg."""
+"""Audio cleanup and pause-aware chunking with ffmpeg.
+
+Ported from MattSchwope/transcribe. ffmpeg comes from the imageio-ffmpeg package,
+so no system install is needed.
+"""
 
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import wave
 from pathlib import Path
 
-# Filter chains for phone recordings of presentations.
+# Filter chains for fuzzy audio (noisy dictation, phone recordings of talks, calls).
 #   highpass   cuts rumble, HVAC hum, mic handling thumps
 #   dynaudnorm evens out volume as the speaker moves or turns away
 #   afftdn     spectral noise reduction (strong only; can smear words if pushed)
@@ -24,21 +27,23 @@ CLEAN_FILTERS: dict[str, list[str]] = {
         "dynaudnorm=f=150:g=11:p=0.9:m=30",
     ],
 }
+PREP_LEVELS = tuple(CLEAN_FILTERS)
 
 SAMPLE_RATE = 16_000
 CHUNK_BITRATE = "64k"  # mono speech; ~0.5 MB per minute, far under the 25 MB API cap
 
+AUDIO_EXTS = {
+    ".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma",
+    ".amr", ".3gp", ".mp4", ".mov", ".webm", ".mkv",
+}
+
 
 def find_ffmpeg() -> str:
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
     try:
         import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        raise SystemExit("ffmpeg not found. Run: pip install imageio-ffmpeg")
+    except ImportError as exc:
+        raise RuntimeError("ffmpeg not found. Run: pip install imageio-ffmpeg") from exc
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -48,10 +53,16 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return result
 
 
+def filter_chain(level: str) -> list[str]:
+    if level not in CLEAN_FILTERS:
+        raise ValueError(f"Unknown audio prep level '{level}'. Use one of: {', '.join(PREP_LEVELS)}")
+    return CLEAN_FILTERS[level]
+
+
 def clean_to_wav(ffmpeg: str, src: Path, dst: Path, level: str) -> None:
     """Decode any audio/video file to 16 kHz mono WAV, applying the cleanup chain."""
+    filters = filter_chain(level)
     cmd = [ffmpeg, "-hide_banner", "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE)]
-    filters = CLEAN_FILTERS[level]
     if filters:
         cmd += ["-af", ",".join(filters)]
     cmd += ["-c:a", "pcm_s16le", str(dst)]
@@ -80,8 +91,12 @@ def detect_silences(ffmpeg: str, src: Path, min_len: float = 0.3, below_mean_db:
         ffmpeg, "-hide_banner", "-nostats", "-i", str(src), "-vn", "-ac", "1",
         "-af", f"highpass=f=100,silencedetect=noise={threshold:.1f}dB:d={min_len}", "-f", "null", "-",
     ])
-    starts = [max(0.0, float(x)) for x in re.findall(r"silence_start: (-?[\d.]+)", result.stderr)]
-    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", result.stderr)]
+    return parse_silences(result.stderr)
+
+
+def parse_silences(stderr: str) -> list[tuple[float, float]]:
+    starts = [max(0.0, float(x)) for x in re.findall(r"silence_start: (-?[\d.]+)", stderr)]
+    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", stderr)]
     return list(zip(starts, ends))
 
 

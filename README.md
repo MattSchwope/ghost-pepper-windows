@@ -22,7 +22,7 @@ Run the same line any time to update and keep building. Every step skips what is
 2. Give your coding agent (Claude Code or Codex) `AGENTS.md`.
 3. Build one phase at a time, starting with Phase 0.
 
-`docs/03_build_phases.md` and `codex/tasks/` describe the original local-only, Ollama-based plan. They are kept for history only.
+`00_START_HERE.md`, `docs/01_*` through `docs/08_*` and `codex/` describe the original local-only plan. They are kept for history only.
 
 ## Repo bootstrap
 
@@ -37,18 +37,26 @@ python -m venv .venv
 Verify the command-line entry point:
 
 ```powershell
-.\.venv\Scripts\python.exe -m gpw.cli --help
+.\.venv\Scripts\gpw.exe --help
 ```
 
-Run the included tests:
+Run the included tests (no API calls; OpenAI is mocked):
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The default config lives at `app/config.example.yaml`. It keeps app data under
-`C:\GhostPepperWindows` and uses local services only, including Ollama on
-`http://localhost:11434`.
+## Commands
+
+Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships inside the `imageio-ffmpeg` package.
+
+| Command | What it does |
+|---|---|
+| `gpw transcribe-file clip.m4a` | Prints the transcript from GPT-Transcribe. Long files are cut at pauses into ~10 minute chunks. `--prep off\|light\|strong`, `--context "one line on the topic"` |
+| `gpw eval --prep off,light,strong` | Runs every clip in `eval/clips/` at each prep level and prints a WER table. Hypotheses are cached in `eval/results/`; `--fresh` redoes them |
+| `gpw record-once --duration 8` | Records a fixed-length clip, transcribes it and copies the text. Replaced by hold-to-talk in Phase 1 |
+
+The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
 
 ## Success definition
 

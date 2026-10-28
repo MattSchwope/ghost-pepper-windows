@@ -9,8 +9,7 @@
 - [ ] Install Git.
 - [ ] Install VS Code.
 - [ ] Install AutoHotkey v2.
-- [ ] Install Ollama for Windows.
-- [ ] Run `ollama pull qwen2.5:3b`.
+- [ ] Copy `.env.example` to `.env` and paste your OpenAI API key.
 - [ ] Run `app/scripts/setup.ps1`.
 - [ ] Open Notepad and test the hotkey.
 - [ ] Confirm Markdown notes appear in `C:\GhostPepperWindows\notes`.

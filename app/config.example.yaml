@@ -10,30 +10,28 @@ recording:
   default_duration_seconds: 8
   input_device: null
 
+# The only cloud service. The key is read from .env or the environment, never from here.
+openai:
+  api_key_env: OPENAI_API_KEY
+  transcribe_model: gpt-transcribe
+  text_model: gpt-6-luna
+  text_reasoning: none
+  summary_model: gpt-6.1-sol
+  timeout_seconds: 600
+  max_retries: 5
+
 transcription:
-  backend: "faster-whisper"
-  model_size: "small.en"
-  device: "cpu"
-  compute_type: "int8"
-  language: "en"
-  vad_filter: true
+  languages: [en]
+  audio_prep: light        # off | light | strong
+  chunk_minutes: 10        # long files are cut at pauses near this length (2-40)
+  keywords: []             # names and acronyms sent as hints; moves to dictionary.yaml in Phase 2
 
 cleanup:
-  enabled: true
-  backend: "ollama"
-  ollama_url: "http://localhost:11434/api/chat"
-  model: "qwen2.5:3b"
+  enabled: false           # text-model pass after transcription; Phase 2 decides the default
   prompt_profile: "general_cleanup"
-  timeout_seconds: 120
-
-clipboard:
-  copy_result: true
-  paste_after_copy: true
 
 markdown:
   save_notes: true
-  include_raw_transcript: true
-  include_cleaned_text: true
 
 privacy:
   debug_log_transcripts: false

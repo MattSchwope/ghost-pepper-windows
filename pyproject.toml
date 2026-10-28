@@ -5,22 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ghost-pepper-windows"
 version = "0.1.0"
-description = "Local-first Windows dictation pipeline for Ghost Pepper Windows."
+description = "Windows dictation and recording-to-Markdown pipeline on OpenAI GPT-Transcribe."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "faster-whisper>=1.1.0",
+    "openai>=2.0.0",
+    "imageio-ffmpeg>=0.5.0",
+    "jiwer>=3.0.0",
     "sounddevice>=0.5.0",
     "soundfile>=0.12.1",
     "numpy>=1.26.0",
     "pyperclip>=1.8.2",
-    "requests>=2.31.0",
     "PyYAML>=6.0.0",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.0.0",
+]
+local = [
+    "faster-whisper>=1.1.0",
+    "av<19",
 ]
 
 [project.scripts]
