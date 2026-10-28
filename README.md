@@ -1,31 +1,18 @@
-# Ghost Pepper Windows — Codex Build Kit
+# Ghost Pepper Windows
 
-This kit is designed to help Codex build a Windows-native version of the Ghost Pepper workflow:
+A Wispr Flow replacement for Windows, plus a long-recording-to-Markdown pipeline.
 
-**hotkey → mic recording → local transcription → local cleanup → clipboard paste → Markdown memory**
+**Hold a hotkey → talk → fuzzy-audio cleanup → OpenAI GPT-Transcribe → personal dictionary + light cleanup → pasted into any app**
 
-The initial build is intentionally simple:
-- Python backend
-- AutoHotkey v2 hotkey layer
-- faster-whisper transcription
-- Ollama cleanup
-- Markdown output for Obsidian/RAG
-
-Later phases can add:
-- tray app
-- GUI settings
-- NAudio/.NET meeting recorder
-- system-audio capture
-- diarization
-- installer
+**Drop a recording in the inbox → transcript + profile summary → Markdown note**
 
 ## Start here
 
-1. Read `00_START_HERE.md`.
-2. Give Codex `AGENTS.md`.
-3. Use the task prompts in `codex/tasks/` one at a time.
-4. Build Phase 1 first before touching meeting transcription.
-5. Do not add cloud services unless explicitly requested.
+1. Read `docs/BUILD_PLAN.md`. It is the source of truth for scope and phase order.
+2. Give your coding agent (Claude Code or Codex) `AGENTS.md`.
+3. Build one phase at a time, starting with Phase 0.
+
+`docs/03_build_phases.md` and `codex/tasks/` describe the original local-only, Ollama-based plan. They are kept for history only.
 
 ## Repo bootstrap
 
@@ -53,15 +40,6 @@ The default config lives at `app/config.example.yaml`. It keeps app data under
 `C:\GhostPepperWindows` and uses local services only, including Ollama on
 `http://localhost:11434`.
 
-## MVP success definition
+## Success definition
 
-The MVP is complete when:
-
-1. User presses a hotkey.
-2. The app records audio.
-3. The app transcribes locally.
-4. The app cleans the transcript locally.
-5. The cleaned text is copied to clipboard.
-6. The cleaned text is pasted into the active app.
-7. A Markdown note is saved locally.
-8. Failures are logged with clear error messages.
+Each phase in `docs/BUILD_PLAN.md` has its own "Done when" checklist.

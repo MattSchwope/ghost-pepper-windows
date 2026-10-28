@@ -1,3 +1,5 @@
+> **Superseded.** See `docs/BUILD_PLAN.md` (October 27, 2026). Kept for history.
+
 # Build Phases
 
 ## Phase 0 — Repo setup
