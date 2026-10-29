@@ -75,6 +75,10 @@ def test_spoken_commands_leave_the_words_alone_in_normal_speech(text):
         ("do not send it", "Do send it.", False),  # dropped a negation
         ("we don't send it", "We send it.", False),
         ("one two three four five six seven eight", "One.", False),  # too much dropped
+        ("we should we need to go", "We need to go.", True),  # restarted with the same opening word
+        ("please send 500 dollars today", "Please send dollars today.", False),  # never drop a number
+        ("please send the dollars today", "Please send dollars today.", False),  # not a false start
+        ("i think we should let's go", "Let's go.", False),  # no repeated opening: can't tell
     ],
 )
 def test_words_kept(source, cleaned, kept):

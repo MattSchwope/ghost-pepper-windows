@@ -103,27 +103,44 @@ def _words(text: str) -> list[str]:
     return [w.casefold().replace("’", "'") for w in re.findall(r"[\w'’]+", text)]
 
 
-def words_kept(source: str, cleaned: str, max_dropped_share: float = 0.25) -> bool:
-    """True if `cleaned` only re-punctuated `source` and dropped fillers or a few false-start words.
+MAX_FALSE_START_WORDS = 4
 
-    Every word of `cleaned` must appear in `source` in the same order. Dropped words other than
-    fillers are capped, and a dropped negation ("not", "don't") always fails.
+
+def words_kept(source: str, cleaned: str) -> bool:
+    """True if `cleaned` only re-punctuated `source` and dropped fillers or false starts.
+
+    Every word of `cleaned` must appear in `source` in the same order. Each run of dropped words
+    must be fillers, or a false start: up to four words the speaker then restarted with the same
+    opening word ("I want I want to", "the the", "we should we need"). Numbers and negations
+    ("not", "don't") are never dropped.
     """
     src, out = _words(source), _words(cleaned)
-    i = 0
-    dropped: list[str] = []
-    for word in out:
-        while i < len(src) and src[i] != word:
-            dropped.append(src[i])
-            i += 1
-        if i == len(src):
+    # Match from the end, so a repeated phrase drops its first, abandoned copy.
+    kept = [False] * len(src)
+    i = len(src) - 1
+    for word in reversed(out):
+        while i >= 0 and src[i] != word:
+            i -= 1
+        if i < 0:
             return False
-        i += 1
-    dropped += src[i:]
-    real = [w for w in dropped if not _FILLER_WORD.fullmatch(w)]
-    if any(w in _NEGATIONS or w.endswith("n't") for w in real):
-        return False
-    return len(real) <= max(2, int(len(src) * max_dropped_share))
+        kept[i] = True
+        i -= 1
+    start = 0
+    while start < len(src):
+        if kept[start]:
+            start += 1
+            continue
+        end = start
+        while end < len(src) and not kept[end]:
+            end += 1
+        run = [w for w in src[start:end] if not _FILLER_WORD.fullmatch(w)]
+        if run:
+            if any(w in _NEGATIONS or w.endswith("n't") or any(c.isdigit() for c in w) for w in run):
+                return False
+            if len(run) > MAX_FALSE_START_WORDS or end >= len(src) or src[end] != run[0]:
+                return False
+        start = end
+    return True
 
 
 @dataclass(frozen=True)

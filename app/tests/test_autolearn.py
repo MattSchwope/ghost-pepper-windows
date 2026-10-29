@@ -30,6 +30,10 @@ def test_locate_finds_the_last_run_even_when_glued():
         ("socom", "SOCOM", True, True),  # inner capitals still prove it
         ("dana", "Sarah", False, False),  # a different name, not a misspelling
         ("x", "X1", False, False),  # too short to match safely
+        ("100", "200", False, False),  # an amount edit, not a spelling
+        ("3 pm", "4 PM", False, False),  # a time edit
+        ("five", "5", False, False),  # no letters left
+        ("b52", "B-52", False, True),  # same digits, new spelling
     ],
 )
 def test_learnable(wrong, right, start, ok):
@@ -63,6 +67,10 @@ def test_find_corrections_ignores_punctuation_rewrites_and_deletions(after):
     assert pairs in ([], [("cavaliro", "Kavaliro")])
     if "Kavaliro" not in after:
         assert pairs == []
+
+
+def test_find_corrections_never_learns_number_edits():
+    assert find_corrections("Pay 100 dollars.", "Pay 100 dollars.", "Pay 200 dollars.") == []
 
 
 def test_find_corrections_needs_the_paste_in_the_first_read():

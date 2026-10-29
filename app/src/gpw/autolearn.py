@@ -67,6 +67,8 @@ def learnable(wrong: str, right: str, sentence_start: bool) -> bool:
     """Is wrong -> right a spelling fix for a name or acronym, safe to apply to every later dictation?"""
     if not wrong or not right or wrong == right or len(wrong) < 2 or len(right) > MAX_TERM_CHARS:
         return False
+    if not any(c.isalpha() for c in right) or re.sub(r"\D", "", wrong) != re.sub(r"\D", "", right):
+        return False  # 100 -> 200, 3 pm -> 4 pm: an amount, date or time edit, not a spelling
     if not any(c.isupper() or c.isdigit() for c in right):
         return False  # their -> there, affect -> effect: grammar or word choice
     inner_caps = any(c.isupper() or c.isdigit() for c in right[1:])
