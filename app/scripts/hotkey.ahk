@@ -8,6 +8,7 @@
 ;   Hold RCtrl, talk, release: the text is pasted where the cursor is.
 ;   Double-tap RCtrl: hands-free. Tap RCtrl once more to stop and paste.
 ;   Esc while recording or transcribing: cancel.
+;   Ctrl+Alt+D with a word selected: add it to the personal dictionary.
 ; Keys and timings come from config.yaml (hotkeys:, dictation:) through the service's /health.
 ; Start it with app\scripts\start_dictation.ps1. Pass --dry-run to paste a fixed sentence
 ; instead of calling OpenAI.
@@ -35,6 +36,8 @@ ServicePid := 0
 DictateKey := "RCtrl"
 DictateKeyName := "RControl"
 CancelKey := "Esc"
+AddWordKey := ""
+DictionaryPath := ""
 TapMs := 250
 DoubleTapMs := 400
 MaxMs := 600000
@@ -62,7 +65,7 @@ Main() {
     try Http("POST", "/cancel")  ; drop anything a previous run left behind
     try BindHotkeys()
     catch as bindError {
-        MsgBox("hotkeys.dictate or hotkeys.cancel in config.yaml is not a key AutoHotkey knows.`n`n" bindError.Message,
+        MsgBox("hotkeys.dictate, cancel or add_word in config.yaml is not a key AutoHotkey knows.`n`n" bindError.Message,
             "Ghost Pepper", "Iconx")
         ExitApp(1)
     }
@@ -119,6 +122,8 @@ LoadSettings(health) {
     DictateKey := JsonValue(health, "dictate_key", "RCtrl")
     DictateKeyName := GetKeyName(DictateKey)
     CancelKey := JsonValue(health, "cancel_key", "Esc")
+    AddWordKey := JsonValue(health, "add_word_key", "")
+    DictionaryPath := StrReplace(JsonValue(health, "dictionary_path"), "/", "\")
     TapMs := Integer(JsonValue(health, "tap_ms", 250))
     DoubleTapMs := Integer(JsonValue(health, "double_tap_ms", 400))
     MaxMs := Integer(JsonValue(health, "max_seconds", 600)) * 1000
@@ -142,6 +147,8 @@ BindHotkeys() {
     HotIf(IsActive)
     Hotkey("*" CancelKey, OnCancelKey)
     HotIf()
+    if (AddWordKey != "")
+        Hotkey(AddWordKey, OnAddWord)
 }
 
 IsActive(*) => State != "idle"
@@ -248,7 +255,7 @@ FinishDictation() {
     if (r != "" && !Aborted) {
         status := GpwHeader(r.whr, "X-Dictation-Status")
         if (status = "ok")
-            PasteAndReport(r.body, GpwHeader(r.whr, "X-Dictation-Id"))
+            PasteAndReport(r.body, GpwHeader(r.whr, "X-Dictation-Id"), GpwHeader(r.whr, "X-Dictation-Note"))
         else if (status = "skipped") {
             PlayCue("empty")
             ShowTip(r.body, 2000)
@@ -264,7 +271,7 @@ FinishDictation() {
 
 ; -- paste --
 
-PasteAndReport(text, id) {
+PasteAndReport(text, id, note := "") {
     try {
         gotTick := A_TickCount
         saved := ClipboardAll()
@@ -280,9 +287,57 @@ PasteAndReport(text, id) {
         ShowTip("Paste failed: " e.Message, 4000)
         return
     }
+    if (note != "")
+        ShowTip(note, 5000)
     body := Format("id={}&release_to_paste_ms={}&paste_ms={}&clipboard_restored={}",
         id, pastedTick - ReleaseTick, pastedTick - gotTick, restored ? 1 : 0)
-    try Http("POST", "/pasted", body, 2000)
+    r := ""
+    try r := Http("POST", "/pasted", body, 2000)
+    learnMs := (r != "") ? Integer(JsonValue(r.body, "learn_ms", 0)) : 0
+    if (learnMs > 0)
+        SetTimer(CheckLearned, -(learnMs + 700))  ; a later paste restarts the wait; nothing is lost
+}
+
+; Auto-learn finished watching the field: show any fix it saved, so a wrong one is easy to spot.
+CheckLearned() {
+    r := ""
+    try r := Http("POST", "/learned", "", 3000)
+    if (r != "" && r.status = 200 && Trim(r.body) != "")
+        ShowTip("Learned for next time (edit in the dictionary from the tray menu):`n" r.body, 5000)
+}
+
+; -- dictionary --
+
+; Copy the selection and add it to dictionary terms. The clipboard is put back afterwards.
+OnAddWord(*) {
+    if (State != "idle")
+        return
+    for mod in ["Ctrl", "Alt", "Shift", "LWin", "RWin"]
+        KeyWait(mod, "T1")  ; let go of the hotkey first, so Ctrl+C is not Ctrl+Alt+C
+    saved := ClipboardAll()
+    A_Clipboard := ""
+    Send("^c")
+    copied := ClipWait(0.6) ? A_Clipboard : ""
+    RestoreClipboard(saved)
+    word := Trim(copied, " `t`r`n")
+    if (word = "") {
+        ShowTip("Select a word first, then press " HotkeyLabel(AddWordKey) ".", 2500)
+        return
+    }
+    if InStr(word, "`n") {
+        ShowTip("Select just the word or name, not a whole line.", 2500)
+        return
+    }
+    r := ""
+    try r := Http("POST", "/dictionary/add", "word=" UriEncode(word), 3000)
+    if (r = "") {
+        ShowTip("The dictation service is not answering.", 3000)
+        return
+    }
+    ok := r.status = 200
+    if !ok
+        PlayCue("error")
+    ShowTip(JsonValue(r.body, ok ? "message" : "error", "Could not add it."), ok ? 2000 : 4000)
 }
 
 ; Put the saved clipboard back and check it byte for byte.
@@ -301,6 +356,7 @@ SetupTray() {
     A_IconTip := "Ghost Pepper: starting"
     A_TrayMenu.Delete()
     A_TrayMenu.Add("Open today's dictation log", OpenDailyLog)
+    A_TrayMenu.Add("Open dictionary", OpenDictionary)
     A_TrayMenu.Add("Open log folder", OpenLogs)
     A_TrayMenu.Add()
     A_TrayMenu.Add("Restart (reloads config)", RestartAll)
@@ -335,6 +391,13 @@ OpenDailyLog(*) {
             Run('notepad.exe "' path '"')
     } else
         ShowTip("No dictations logged today yet.", 2000)
+}
+
+OpenDictionary(*) {
+    if (DictionaryPath != "" && FileExist(DictionaryPath))
+        Run('notepad.exe "' DictionaryPath '"')  ; .yaml has no default app on most PCs
+    else
+        ShowTip("No dictionary file yet. It is created when the service starts.", 2500)
 }
 
 OpenLogs(*) {

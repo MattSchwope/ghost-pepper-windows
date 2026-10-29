@@ -59,6 +59,7 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 | `gpw record-once --duration 8` | Beeps, records for that many seconds, beeps again, then transcribes and copies the text. Uses the Windows default mic unless `recording.input_device` names another. Kept for quick mic checks; daily dictation uses hold-to-talk below |
 | `gpw serve` | The always-running dictation service the hotkey script talks to, on 127.0.0.1 only. `--dry-run` pastes a fixed sentence instead of calling OpenAI. Normally started for you by the hotkey script |
 | `gpw latency` | Release-to-paste report from the dictation timing log: median, 90th percentile, and where the time goes. `--last 50` for the most recent 50 |
+| `gpw dictionary` | Shows where the personal dictionary is, how many terms and fixes it has, how many terms go out with each dictation, and any error in the file. Creates a starter file if there is none |
 
 The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
 
@@ -78,8 +79,9 @@ A green dot appears in the system tray, and the script starts the Python service
 | Tap Right Ctrl twice | Hands-free: talk as long as you like (up to 10 minutes). Tap Right Ctrl once to stop and paste |
 | Esc while recording or transcribing | Cancels. Nothing is pasted |
 | Right Ctrl plus another key (Ctrl+C) | Works as normal; the recording is dropped quietly |
+| Select a word, press Ctrl+Alt+D (left Ctrl) | Adds it to the personal dictionary |
 
-The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Right-click it for today's dictation log, the log folder, Restart (after config changes) and Exit.
+The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Right-click it for today's dictation log, the dictionary, the log folder, Restart (after config changes) and Exit.
 
 - Clips with no speech are skipped: no API call and no paste.
 - Every dictation is appended to `C:\GhostPepperWindows\notes\dictation\YYYY-MM-DD.md` (`dictation.daily_log`).
@@ -87,6 +89,20 @@ The tray dot is green when ready, red while listening, pink in hands-free and am
 - To try the keys and paste without spending anything: `.\app\scripts\start_dictation.ps1 -DryRun`.
 - Keys, timings, sounds and the silence threshold are in the `hotkeys:` and `dictation:` blocks of the config.
 - Windows blocks pasting into apps that run as administrator unless AutoHotkey runs as administrator too.
+
+### Personal dictionary and cleanup
+
+`C:\GhostPepperWindows\dictionary.yaml` is created with examples the first time the service starts. Open it from the tray menu. Changes apply to the next dictation, with no restart.
+
+- `terms:` names and acronyms sent to GPT-Transcribe as spelling hints with every dictation, top of the list first (at most `dictionary.max_keywords`).
+- `replace:` fixes applied after transcription, as `"heard": "Wanted"`. They ignore case and only match whole words.
+- Auto-learn (experimental, `dictionary.auto_learn`): for 15 seconds after a paste, it watches the text field. If you fix a name or acronym in the pasted text (cavaliro to Kavaliro), it saves that fix and shows a tooltip. Plain lowercase edits are never learned. It reads the field through Windows UI Automation; nothing leaves the PC.
+
+Cleanup never changes word choice:
+
+- `cleanup.remove_fillers` drops um, uh and erm.
+- `cleanup.spoken_commands`: say "new line" or "new paragraph" to break the text there. "a new line of credit" stays as words.
+- `cleanup.ai_pass` (off by default) adds a text-model pass for punctuation and false starts. It adds a round trip, and its answer is thrown away if it changed, added or reordered a word.
 
 ## Success definition
 

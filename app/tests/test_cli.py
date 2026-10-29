@@ -164,3 +164,47 @@ def test_serve_without_api_key_fails_clearly(tmp_path, config_file, monkeypatch,
         cli.main(["--config", str(config_file), "serve"])
     assert exit_info.value.code == 1
     assert "OPENAI_API_KEY is not set" in capsys.readouterr().err + caplog.text
+
+
+def test_dictionary_command_creates_the_file_and_reports(tmp_path, config_file, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "dictionary"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "Created a starter dictionary." in out and "Terms: 5   Fixes: 2" in out
+    assert (tmp_path / "data" / "dictionary.yaml").is_file()
+
+    (tmp_path / "data" / "dictionary.yaml").write_text("terms: [Acme", encoding="utf-8")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "dictionary"])
+    assert exit_info.value.code == 1
+    assert "Error:" in capsys.readouterr().out
+
+
+def test_transcribe_file_sends_dictionary_terms(tmp_path, config_file, monkeypatch):
+    sent = []
+
+    class Recording(FakeEngine):
+        def transcribe(self, path, prompt, keywords, languages):
+            sent.append(keywords)
+            return super().transcribe(path, prompt, keywords, languages)
+
+    monkeypatch.setattr(cli, "_engine", lambda config: Recording())
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "data" / "dictionary.yaml").write_text("terms: [Kavaliro, SOCOM]", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cli.main(["--config", str(config_file), "transcribe-file", str(_tone(tmp_path / "clip.wav"))])
+    assert sent and sent[0] == ["Kavaliro", "SOCOM"]
+
+
+def test_build_service_sets_up_the_dictionary_and_skips_auto_learn_in_dry_runs(tmp_path, config_file, monkeypatch):
+    from gpw.config import load_config
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "dictionary:\n  auto_learn: true\n", encoding="utf-8")
+    service = cli.build_service(load_config(config_file), dry_run=True)
+    try:
+        assert (tmp_path / "data" / "dictionary.yaml").is_file()
+        assert service.dictionary is not None and service.learner is None
+    finally:
+        service.close()

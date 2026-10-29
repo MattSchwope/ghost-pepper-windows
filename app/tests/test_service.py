@@ -95,10 +95,10 @@ def make_config(tmp_path, **sections):
 def make_service(tmp_path):
     services = []
 
-    def factory(mic=None, engine=None, clean=None, **sections):
+    def factory(mic=None, engine=None, clean=None, dictionary=None, learner=None, **sections):
         config = make_config(tmp_path, **sections)
         service = DictationService(
-            config, engine or FakeEngine(), mic or FakeMic(), clean=clean,
+            config, engine or FakeEngine(), mic or FakeMic(), clean=clean, dictionary=dictionary, learner=learner,
             now=lambda: datetime(2026, 10, 28, 9, 15, 0),
         )
         services.append(service)
@@ -369,3 +369,141 @@ def test_health_reports_settings_for_the_hotkey_script(make_service):
     assert health["max_seconds"] == 180 and health["sounds"] is False
     assert health["assets_dir"].endswith("data/assets")
     json.dumps(health)
+
+
+# -- Phase 2: dictionary, cleanup, auto-learn --
+
+class BadRequestError(Exception):
+    """Stands in for openai.BadRequestError; the service matches on the class name."""
+
+
+@pytest.fixture
+def dictionary(tmp_path):
+    from gpw.dictionary import DictionaryStore
+
+    path = tmp_path / "dictionary.yaml"
+    path.write_text('terms: [Kavaliro, TS/SCI]\nreplace:\n  "dana": "Dana"\n  "cavaliro": "Kavaliro"\n', encoding="utf-8")
+    return DictionaryStore(path, ["SOCOM", "Kavaliro"], max_keywords=100)
+
+
+def test_dictionary_terms_go_out_first_and_fixes_apply(make_service, dictionary):
+    engine = FakeEngine(text="Um, send the cavaliro notes to dana. New paragraph. Thanks.")
+    service = make_service(engine=engine, dictionary=dictionary)
+    service.start()
+    result = service.stop()
+    assert engine.calls[0]["keywords"] == ["Kavaliro", "TS/SCI", "SOCOM"]
+    assert result.text == "Send the Kavaliro notes to Dana.\n\nThanks."
+    service.pasted(result.dictation_id, 1500, 30, True)
+    service.wait_for_background()
+    daily = (service.config.notes_dir / "dictation" / "2026-10-28.md").read_text(encoding="utf-8")
+    assert "**Raw transcript:** Um, send the cavaliro notes" in daily
+    assert "cavaliro" not in json.dumps(latency_records(service)).lower()
+
+
+def test_cleanup_rules_can_be_turned_off(make_service):
+    service = make_service(engine=FakeEngine(text="Um, new line done."), cleanup={"remove_fillers": False, "spoken_commands": False})
+    service.start()
+    assert service.stop().text == "Um, new line done."
+
+
+def test_refused_dictionary_hints_are_dropped_for_that_dictation(make_service, dictionary, caplog):
+    class Refuses(FakeEngine):
+        def transcribe_clip(self, filename, data, keywords, languages, timeout):
+            if keywords:
+                self.calls.append({"keywords": keywords})
+                raise BadRequestError("keywords")
+            return super().transcribe_clip(filename, data, keywords, languages, timeout)
+
+    engine = Refuses()
+    service = make_service(engine=engine, dictionary=dictionary)
+    service.start()
+    result = service.stop()
+    assert result.status == "ok" and result.text == SECRET and "dictionary hints" in result.note
+    assert [len(c["keywords"]) for c in engine.calls] == [3, 0]
+    service.pasted(result.dictation_id, 1500, 30, True)
+    record = latency_records(service)[-1]
+    assert record["keywords"] == 3 and record["keywords_dropped"] is True
+
+
+def test_a_request_refused_again_without_hints_is_an_error(make_service, dictionary):
+    engine = FakeEngine(error=BadRequestError("audio"))
+    service = make_service(engine=engine, dictionary=dictionary)
+    service.start()
+    # FakeEngine raises for every call: the retry without hints fails too and the error is reported.
+    assert service.stop().status == "error"
+    assert len(engine.calls) == 2
+
+
+def test_text_model_that_changes_words_is_not_used(make_service):
+    service = make_service(engine=FakeEngine(text="send it today"), clean=lambda text: "Send it tomorrow.")
+    service.start()
+    result = service.stop()
+    assert result.text == "send it today"
+    service.pasted(result.dictation_id, 1500, 30, True)
+    assert latency_records(service)[-1]["cleanup_ai"] == "rejected"
+
+
+class FakeLearner:
+    seconds = 15.0
+    available = True
+
+    def __init__(self):
+        self.watched = []
+        self.started = self.closed = False
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+    def watch(self, dictation_id, text):
+        self.watched.append((dictation_id, text))
+        return True
+
+    def take_learned(self):
+        return [("cavaliro", "Kavaliro")]
+
+
+def test_paste_starts_auto_learn_with_the_pasted_text(make_service):
+    learner = FakeLearner()
+    service = make_service(learner=learner)
+    service.open()
+    assert learner.started
+    service.start()
+    result = service.stop()
+    assert service.pasted(result.dictation_id, 1300, 30, True)
+    assert service.watch_for_corrections(result.dictation_id) == 15000
+    assert learner.watched == [(result.dictation_id, SECRET)]
+    assert service.watch_for_corrections(result.dictation_id) == 0  # once per paste
+    assert service.take_learned() == [("cavaliro", "Kavaliro")]
+    assert SECRET not in json.dumps(latency_records(service))
+
+
+def test_without_a_learner_nothing_is_watched(make_service):
+    service = make_service()
+    service.start()
+    result = service.stop()
+    assert service.watch_for_corrections(result.dictation_id) == 0
+    assert service.take_learned() == []
+
+
+def test_add_word(make_service, dictionary, caplog):
+    caplog.set_level(logging.INFO)
+    service = make_service(dictionary=dictionary)
+    assert service.add_word("  SOCOM ") == (True, 'Added "SOCOM" to the dictionary.')
+    assert service.add_word("socom") == (False, '"socom" is already in the dictionary.')
+    assert "SOCOM" in dictionary.current().terms
+    assert "SOCOM" not in caplog.text
+    with pytest.raises(ValueError):
+        service.add_word("x" * 80)
+    with pytest.raises(ValueError):
+        make_service().add_word("SOCOM")
+
+
+def test_health_reports_the_dictionary_and_add_word_key(make_service, dictionary):
+    health = make_service(dictionary=dictionary, learner=FakeLearner()).health()
+    assert health["add_word_key"] == "^!d"
+    assert health["dictionary_path"].endswith("dictionary.yaml") and health["auto_learn"] is True
+    plain = make_service(hotkeys={"add_word": ""}).health()
+    assert plain["add_word_key"] == "" and plain["dictionary_path"] == "" and plain["auto_learn"] is False

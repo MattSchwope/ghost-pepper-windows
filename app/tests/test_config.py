@@ -108,3 +108,45 @@ def test_dictation_bare_off_audio_prep_means_off():
 def test_bad_dictation_settings_rejected(raw, match):
     with pytest.raises(ValueError, match=match):
         parse_config(raw)
+
+
+def test_phase_2_defaults():
+    config = parse_config({"app": {"data_dir": "D:/GP"}})
+    assert config.hotkeys.add_word == "^!d"
+    assert config.cleanup.remove_fillers is True and config.cleanup.spoken_commands is True
+    assert config.cleanup_enabled is False and config.prompt_profile == "dictation_light"
+    assert config.dictionary_path == Path("D:/GP/dictionary.yaml")
+    assert config.dictionary.max_keywords == 100 and config.dictionary.auto_learn is False
+    assert config.dictionary.learn_seconds == 15.0
+
+
+def test_phase_2_settings():
+    config = parse_config({
+        "hotkeys": {"add_word": ""},
+        "cleanup": {"remove_fillers": False, "spoken_commands": False, "ai_pass": True},
+        "dictionary": {"path": "E:/words.yaml", "max_keywords": 20, "auto_learn": True, "learn_seconds": 8},
+    })
+    assert config.hotkeys.add_word == ""
+    assert config.cleanup.remove_fillers is False and config.cleanup.spoken_commands is False
+    assert config.cleanup_enabled is True
+    assert config.dictionary_path == Path("E:/words.yaml")
+    assert config.dictionary.max_keywords == 20 and config.dictionary.auto_learn is True
+    assert config.dictionary.learn_seconds == 8.0
+
+
+def test_cleanup_enabled_still_works_as_the_ai_pass_switch():
+    assert parse_config({"cleanup": {"enabled": True}}).cleanup_enabled is True
+    assert parse_config({"cleanup": {"enabled": True, "ai_pass": False}}).cleanup_enabled is False
+
+
+@pytest.mark.parametrize("section", [{"max_keywords": 0}, {"learn_seconds": -1}])
+def test_bad_dictionary_settings_fail_clearly(section):
+    with pytest.raises(ValueError, match="dictionary"):
+        parse_config({"dictionary": section})
+
+
+def test_example_config_turns_on_the_phase_2_extras_but_not_the_ai_pass():
+    config = load_config(Path("app/config.example.yaml"))
+    assert config.dictionary.auto_learn is True and config.dictionary.path is None
+    assert config.cleanup_enabled is False and config.prompt_profile == "dictation_light"
+    assert config.hotkeys.add_word == "^!d"

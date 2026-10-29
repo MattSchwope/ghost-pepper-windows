@@ -5,7 +5,9 @@ Endpoints:
   POST /start    open the mic and start recording (JSON)
   POST /stop     stop, transcribe; the body is the text to paste (text/plain), status in X-Dictation-* headers
   POST /cancel   drop the recording, or the transcription in flight (JSON)
-  POST /pasted   the script reports its release-to-paste timing (JSON)
+  POST /pasted   the script reports its release-to-paste timing; starts auto-learn (JSON)
+  POST /learned  fixes auto-learn saved since the last call, one "wrong -> Right" per line (text/plain)
+  POST /dictionary/add  the add-word hotkey: word=<selected text> (JSON)
 
 POSTs must carry the X-GPW-Client header and no Origin header, so a web page
 cannot start the mic: browsers add Origin to cross-site requests and cannot add
@@ -100,11 +102,18 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                     self._json(200, {"ok": True, "result": service.cancel()})
                 elif path == "/pasted":
                     restored = form.get("clipboard_restored", [""])[0]
+                    dictation_id = _int(form, "id")
                     ok = service.pasted(
-                        _int(form, "id"), _int(form, "release_to_paste_ms"), _int(form, "paste_ms"),
+                        dictation_id, _int(form, "release_to_paste_ms"), _int(form, "paste_ms"),
                         None if restored == "" else restored == "1",
                     )
-                    self._json(200, {"ok": ok})
+                    learn_ms = service.watch_for_corrections(dictation_id) if ok else 0
+                    self._json(200, {"ok": ok, "learn_ms": learn_ms})
+                elif path == "/learned":
+                    lines = [f"{wrong} -> {right}" for wrong, right in service.take_learned()]
+                    self._send(200, "\n".join(lines).encode("utf-8"), "text/plain; charset=utf-8")
+                elif path == "/dictionary/add":
+                    self._add_word(form.get("word", [""])[0])
                 else:
                     self._json(404, {"ok": False, "error": "Not found."})
             except Exception as exc:
@@ -120,13 +129,20 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                 logger.error("Mic error: %s", exc)
                 self._json(503, {"ok": False, "error": str(exc)})
 
+        def _add_word(self, word: str) -> None:
+            try:
+                added, message = service.add_word(word)
+                self._json(200, {"ok": True, "added": added, "message": message})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+
         def _stop(self, mode: str) -> None:
             result = service.stop("".join(ch for ch in mode if ch.isalnum() or ch == "_")[:20] or "hold")
             body = result.text if result.status == "ok" else result.message
-            self._send(
-                200, body.encode("utf-8"), "text/plain; charset=utf-8",
-                {"X-Dictation-Id": str(result.dictation_id), "X-Dictation-Status": result.status},
-            )
+            headers = {"X-Dictation-Id": str(result.dictation_id), "X-Dictation-Status": result.status}
+            if result.note:
+                headers["X-Dictation-Note"] = result.note
+            self._send(200, body.encode("utf-8"), "text/plain; charset=utf-8", headers)
 
     return Handler
 

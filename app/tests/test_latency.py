@@ -72,3 +72,10 @@ def test_report_with_no_data(tmp_path):
     text = format_report(summarize([]), tmp_path / "x.jsonl")
     assert "Pasted: 0" in text
     assert "no ~10 s dictations logged yet" in text
+
+
+def test_report_shows_text_model_cleanup_only_when_used(tmp_path):
+    plain = format_report(summarize([pasted(10.0, 1.3)]), tmp_path / "x.jsonl")
+    assert "text-model cleanup" not in plain
+    with_ai = format_report(summarize([pasted(10.0, 2.0, cleanup=0.6)]), tmp_path / "x.jsonl")
+    assert "Median text-model cleanup" in with_ai and "0.60s" in with_ai

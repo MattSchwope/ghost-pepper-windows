@@ -93,5 +93,13 @@ Check("json escapes", JsonValue(json, "mic"), 'Mic "USB" ' Chr(0xE9) '\x')
 Check("json path", JsonValue(json, "assets_dir"), "C:/GP/assets")
 Check("json missing key", JsonValue(json, "nope", "fallback"), "fallback")
 
+; Add-word hotkey label and form encoding
+Check("label ctrl alt d", HotkeyLabel("^!d"), "Ctrl+Alt+D")
+Check("label win shift F9", HotkeyLabel("#+F9"), "Win+Shift+F9")
+Check("label with prefixes", HotkeyLabel("~*^d"), "Ctrl+D")
+Check("encode plain", UriEncode("Kavaliro"), "Kavaliro")
+Check("encode reserved", UriEncode("TS/SCI & CI Poly+1"), "TS%2FSCI%20%26%20CI%20Poly%2B1")
+Check("encode utf-8", UriEncode("Zoë"), "Zo%C3%AB")
+
 FileAppend(Failures ? Failures " failed`n" : "ALL PASSED`n", "*")
 ExitApp(Failures ? 1 : 0)
