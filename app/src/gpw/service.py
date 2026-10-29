@@ -172,6 +172,7 @@ class DictationService:
             self._session = {
                 "id": self._id,
                 "ts": self.now().isoformat(timespec="seconds"),
+                "model": self.engine.model,
                 "mic_open": _r(time.perf_counter() - started),
             }
             dictation_id = self._id

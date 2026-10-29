@@ -222,6 +222,7 @@ def test_paste_report_completes_the_latency_record(make_service):
     record = latency_records(service)[-1]
     assert record["status"] == "pasted"
     assert record["mode"] == "handsfree"
+    assert record["model"] == "gpt-transcribe"  # so `gpw latency` can leave dry runs out
     assert record["release_to_paste"] == 1.38 and record["paste"] == 0.035
     assert record["clipboard_restored"] is True
     assert record["api"] == 0.42 and record["server"] == 0.31

@@ -41,6 +41,21 @@ def test_summarize_buckets_ten_second_clips():
     assert (s["clipboard_checked"], s["clipboard_restored"]) == (5, 4)
 
 
+def test_dry_runs_are_left_out(tmp_path):
+    records = [
+        pasted(4.9, 0.08, api=0.0, model="dry-run", server=None),
+        pasted(5.9, 0.06, api=0.0, server=None),  # logged before records carried the model
+        {"status": "skipped", "audio": 1.0, "model": "dry-run"},
+        pasted(3.1, 1.56, model="gpt-transcribe"),
+        pasted(2.3, 1.73, model="gpt-transcribe"),
+        pasted(3.6, 1.50, model="gpt-transcribe"),
+    ]
+    s = summarize(records)
+    assert (s["pasted"], s["skipped"], s["dry_runs"]) == (3, 0, 3)
+    assert s["all"]["median"] == 1.56
+    assert "Dry runs (not counted): 3" in format_report(s, tmp_path / "x.jsonl")
+
+
 def test_report_says_when_the_target_is_met_but_too_few(tmp_path):
     text = format_report(summarize([pasted(10.0, 1.3)] * 12), tmp_path / "x.jsonl")
     assert "Median release-to-paste" in text

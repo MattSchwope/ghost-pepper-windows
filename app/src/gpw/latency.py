@@ -52,7 +52,14 @@ def _median_of(records: list[dict[str, Any]], key: str) -> float | None:
     return percentile([float(r[key]) for r in records if isinstance(r.get(key), (int, float))], 50)
 
 
+def is_dry_run(record: dict[str, Any]) -> bool:
+    # Older records carry no model; a real OpenAI round trip never takes 0 ms, so api == 0 marks a dry run.
+    return record.get("model") == "dry-run" or record.get("api") == 0
+
+
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
+    dry_runs = sum(1 for r in records if is_dry_run(r))
+    records = [r for r in records if not is_dry_run(r)]
     pasted = [r for r in records if r.get("status") == "pasted" and isinstance(r.get("release_to_paste"), (int, float))]
     low, high = TEN_SECOND_CLIPS
     ten = [r for r in pasted if low <= float(r.get("audio", 0)) <= high]
@@ -75,6 +82,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "pasted": len(pasted),
         "skipped": sum(1 for r in records if r.get("status") == "skipped"),
         "errors": sum(1 for r in records if r.get("status") == "error"),
+        "dry_runs": dry_runs,
         "all": stats(pasted),
         "ten": stats(ten),
         "clipboard_checked": len(checked),
@@ -103,7 +111,8 @@ def format_report(summary: dict[str, Any], source: Path) -> str:
     width = max(len(r[0]) for r in rows)
     lines = [
         f"Dictation latency from {source}",
-        f"Pasted: {summary['pasted']}   Skipped (silence): {summary['skipped']}   Errors: {summary['errors']}",
+        f"Pasted: {summary['pasted']}   Skipped (silence): {summary['skipped']}   Errors: {summary['errors']}"
+        + (f"   Dry runs (not counted): {summary['dry_runs']}" if summary["dry_runs"] else ""),
         "",
         f"{head[0]:<{width}}  {head[1]:>10}  {head[2]:>12}",
     ]
