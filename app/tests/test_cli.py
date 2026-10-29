@@ -128,3 +128,39 @@ def test_no_ollama_references_in_app():
         and re.search(r"ollama|qwen", p.read_text(encoding="utf-8", errors="ignore"), re.I)
     ]
     assert hits == []
+
+
+def test_latency_command_prints_report(tmp_path, config_file, capsys):
+    from gpw.latency import append_record
+
+    logs = tmp_path / "data" / "logs" / "dictation-latency.jsonl"
+    for r2p in (1.2, 1.4, 1.6):
+        append_record(logs, {"status": "pasted", "audio": 10.0, "release_to_paste": r2p, "api": 1.0})
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "latency", "--last", "2"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "Result: 1.50 s -> met (only 2 so far; need 50)." in out
+
+
+def test_build_service_dry_run_needs_no_key(tmp_path, config_file, monkeypatch):
+    from gpw.config import load_config
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    service = cli.build_service(load_config(config_file), dry_run=True)
+    try:
+        assert service.engine.model == "dry-run"
+        assert (tmp_path / "data" / "assets" / "start.wav").is_file()
+        assert service.health()["dry_run"] is True
+    finally:
+        service.close()
+
+
+def test_serve_without_api_key_fails_clearly(tmp_path, config_file, monkeypatch, capsys, caplog):
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)  # no repo .env to fall back on
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "serve"])
+    assert exit_info.value.code == 1
+    assert "OPENAI_API_KEY is not set" in capsys.readouterr().err + caplog.text

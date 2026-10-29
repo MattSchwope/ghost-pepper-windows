@@ -100,3 +100,69 @@ def test_make_client_reads_key_from_configured_env(monkeypatch):
     client = make_client(OpenAIConfig(api_key_env="GPW_TEST_KEY", max_retries=2, timeout_seconds=30))
     assert client.api_key == "sk-test-not-real"
     assert client.max_retries == 2
+
+
+def _raw_client(text, headers):
+    client = MagicMock()
+    client.with_options.return_value = client
+    raw = MagicMock()
+    raw.parse.return_value = SimpleNamespace(text=text)
+    raw.headers = headers
+    client.audio.transcriptions.with_raw_response.create.return_value = raw
+    return client
+
+
+def test_transcribe_clip_sends_bytes_and_reads_server_time():
+    client = _raw_client(" Hello there. ", {"openai-processing-ms": "850"})
+    result = OpenAIEngine(client).transcribe_clip("dictation.flac", b"fLaC", ["Kavaliro"], ["en"], timeout=31.5)
+    assert result.text == "Hello there."
+    assert result.server_seconds == 0.85
+    assert result.api_seconds >= 0
+    client.with_options.assert_called_once_with(timeout=31.5, max_retries=1)
+    kwargs = client.audio.transcriptions.with_raw_response.create.call_args.kwargs
+    assert kwargs == {"file": ("dictation.flac", b"fLaC"), "model": "gpt-transcribe", "keywords": ["Kavaliro"], "languages": ["en"]}
+
+
+def test_transcribe_clip_without_server_header():
+    client = _raw_client(None, {})
+    result = OpenAIEngine(client).transcribe_clip("dictation.wav", b"RIFF", [], [], timeout=30)
+    assert result.text == "" and result.server_seconds is None
+    assert set(client.audio.transcriptions.with_raw_response.create.call_args.kwargs) == {"file", "model"}
+
+
+def test_server_seconds_ignores_junk():
+    from gpw.engines import server_seconds
+
+    assert server_seconds({"openai-processing-ms": "1234"}) == 1.234
+    assert server_seconds({"openai-processing-ms": "soon"}) is None
+    assert server_seconds(None) is None
+
+
+def test_prewarm_lists_models_with_short_timeout():
+    client = MagicMock()
+    client.with_options.return_value = client
+    OpenAIEngine(client).prewarm()
+    client.with_options.assert_called_once_with(timeout=5, max_retries=0)
+    client.models.list.assert_called_once_with()
+
+
+def test_dry_run_engine_reports_duration_without_network():
+    import io
+
+    import numpy as np
+    import soundfile as sf
+
+    from gpw.engines import DryRunEngine
+
+    buf = io.BytesIO()
+    sf.write(buf, np.zeros(32_000, dtype=np.float32), 16_000, format="FLAC", subtype="PCM_16")
+    result = DryRunEngine().transcribe_clip("dictation.flac", buf.getvalue(), [], [], timeout=30)
+    assert result.text == "Dry run: heard 2.0 seconds of audio."
+
+
+def test_make_client_with_keepalive(monkeypatch):
+    from openai import DefaultHttpxClient
+
+    monkeypatch.setenv("GPW_TEST_KEY", "sk-test-not-real")
+    client = make_client(OpenAIConfig(api_key_env="GPW_TEST_KEY"), keepalive_seconds=120)
+    assert isinstance(client._client, DefaultHttpxClient)
