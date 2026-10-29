@@ -26,8 +26,32 @@ transcription:
   chunk_minutes: 10        # long files are cut at pauses near this length (2-40)
   keywords: []             # names and acronyms sent as hints; moves to dictionary.yaml in Phase 2
 
+# Hold-to-talk dictation: `gpw serve` plus app/scripts/hotkey.ahk. Restart from the tray icon after edits.
+service:
+  port: 8765               # always bound to 127.0.0.1
+
+hotkeys:
+  dictate: RCtrl           # hold to talk. Double-tap for hands-free, then tap once to stop
+  cancel: Esc              # only caught while recording or transcribing
+  tap_ms: 250              # a press shorter than this counts as a tap
+  double_tap_ms: 400       # the most time allowed between the two taps
+
+dictation:
+  audio_prep: light        # off | light | strong (strong runs ffmpeg denoise and adds ~0.2 s)
+  silence_peak_dbfs: -35   # clips that never get louder than this are skipped: no API call, no paste
+  min_speech_ms: 200       # clips with less loud audio than this are skipped too (a tap, a click)
+  upload_format: flac      # flac | wav. FLAC is about half the size, so it uploads faster
+  warm_mic: false          # true keeps the mic open with a short pre-roll, if first words get clipped
+  preroll_ms: 300
+  mic_open_timeout_seconds: 3
+  hands_free_max_minutes: 10
+  daily_log: true          # append every dictation to <notes_dir>/dictation/YYYY-MM-DD.md
+  sounds: true             # start and stop beeps
+  paste_restore_ms: 250    # wait this long after pasting before putting the old clipboard back
+  prewarm_connection: true # connect to OpenAI on key down, so the upload skips the handshake
+
 cleanup:
-  enabled: false           # text-model pass after transcription; Phase 2 decides the default
+  enabled: false          # text-model pass after transcription; Phase 2 decides the default
   prompt_profile: "general_cleanup"
 
 markdown:

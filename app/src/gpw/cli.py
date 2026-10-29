@@ -32,6 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--results", default=str(REPO_ROOT / "eval" / "results"), help="Where hypotheses are cached")
     ev.add_argument("--fresh", action="store_true", help="Ignore cached hypotheses and call the API again")
 
+    srv = subparsers.add_parser("serve", help="Run the dictation service the hotkey script talks to (127.0.0.1 only)")
+    srv.add_argument("--port", type=int, default=None, help="Port on 127.0.0.1 (default: service.port in the config)")
+    srv.add_argument("--dry-run", action="store_true", help="Paste a fixed sentence instead of calling OpenAI")
+
+    lat = subparsers.add_parser("latency", help="Report release-to-paste times from the dictation timing log")
+    lat.add_argument("--last", type=int, default=None, help="Only the most recent N dictations")
+
     return parser
 
 
@@ -188,6 +195,77 @@ def run_eval_command(config: AppConfig, clips_dir: Path, prep_arg: str, results_
     return 0 if len(results) == len(clips) * len(preps) else 1
 
 
+def build_service(config: AppConfig, dry_run: bool):
+    from .assets import write_assets
+    from .engines import DryRunEngine, OpenAIEngine
+    from .mic import MicCapture
+    from .openai_client import make_client
+    from .service import DictationService
+
+    d = config.dictation
+    clean = None
+    if dry_run:
+        engine = DryRunEngine()
+    else:
+        # A long keep-alive lets the prewarmed connection survive a long dictation.
+        client = make_client(config.openai, keepalive_seconds=120)
+        engine = OpenAIEngine(client, config.openai.transcribe_model)
+        if config.cleanup_enabled:
+            from .cleaner import clean_text, load_prompt
+            from .text_client import OpenAITextClient
+
+            text_client = OpenAITextClient(client, config.openai.text_model, config.openai.text_reasoning)
+            prompt = load_prompt(PROMPT_DIR, config.prompt_profile)
+            clean = lambda text: clean_text(text_client, text, prompt)  # noqa: E731
+    mic = MicCapture(
+        sample_rate=config.sample_rate,
+        channels=config.channels,
+        device=config.input_device,
+        open_timeout=d.mic_open_timeout_seconds,
+        max_seconds=d.max_seconds + 5,  # the hotkey script stops at the limit; this is the backstop
+        warm=d.warm_mic,
+        preroll_ms=d.preroll_ms,
+    )
+    assets = write_assets(config.data_dir / "assets")
+    return DictationService(config, engine, mic, clean=clean, dry_run=dry_run, assets_dir=assets)
+
+
+def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
+    from .server import make_server
+
+    service = build_service(config, dry_run)
+    try:
+        service.open()
+        server = make_server(service, port or config.service_port)
+    except Exception:
+        service.close()
+        raise
+    logger.info(
+        "Dictation service ready on http://127.0.0.1:%s model=%s prep=%s warm_mic=%s%s",
+        server.server_port, service.engine.model, config.dictation.audio_prep, config.dictation.warm_mic,
+        " (dry run: no OpenAI calls)" if dry_run else "",
+    )
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        logger.info("Stopping dictation service")
+    finally:
+        server.server_close()
+        service.close()
+    return 0
+
+
+def run_latency(config: AppConfig, last: int | None) -> int:
+    from .latency import format_report, load_records, summarize
+
+    path = config.logs_dir / "dictation-latency.jsonl"
+    records = load_records(path)
+    if last:
+        records = records[-last:]
+    sys.stdout.write(format_report(summarize(records), path) + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -200,6 +278,10 @@ def main(argv: list[str] | None = None) -> None:
             code = run_pipeline(config, Path(args.audio_path), None, args.profile, args.prep, args.context)
         elif args.command == "eval":
             code = run_eval_command(config, Path(args.clips), args.prep, Path(args.results), args.fresh)
+        elif args.command == "serve":
+            code = run_serve(config, args.port, args.dry_run)
+        elif args.command == "latency":
+            code = run_latency(config, args.last)
         else:
             code = 1
     except (FileNotFoundError, RuntimeError, ValueError) as exc:

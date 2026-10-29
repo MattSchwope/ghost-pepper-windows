@@ -143,6 +143,8 @@ files:
 - [ ] Hands-free handles a 3-minute dictation.
 - [ ] The clipboard comes back intact after every paste.
 
+How to check: `gpw latency --last 50` reports the median release-to-paste for 7-13 s clips and how many pastes restored the clipboard byte for byte. `start_dictation.ps1 -DryRun` tries keys and paste with no OpenAI calls.
+
 ## Phase 1b: Live streaming (only if Phase 1 misses 1.5 seconds)
 
 - Stream mic audio to `gpt-live-transcribe` while the key is held, so text is ready at release.
@@ -320,4 +322,7 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 2. Daily dictation log on or off by default.
 3. Whether to keep `transcribe` as a standalone CLI or archive it after Phase 4.
 4. Whether to delete the pre-v2 docs (`00_START_HERE.md`, `docs/01_*`-`08_*`, `codex/`). They still describe the Ollama plan; the README marks them as history.
-5. Phase 1 clip prep in numpy should match the ffmpeg `light` chain closely enough that `gpw eval` results carry over.
+5. Phase 1 clip prep in numpy should match the ffmpeg `light` chain closely enough that `gpw eval` results carry over. Phase 1 finding: it tracks ffmpeg within about 2 dB (`test_light_prep_tracks_ffmpeg_light_chain`). Both leave clips under about 4 seconds unboosted, because dynaudnorm fades its gain in from 1.0 over about 2 seconds at each end. For short dictations `light` is in effect highpass only. Phase 5 could test a flat gain for dictation.
+6. Clipboard history: pasted dictations land in Windows clipboard history (Win+V) and cloud clipboard sync when those are on. Excluding them needs the `ExcludeClipboardContentFromMonitorProcessing` clipboard format. Decide in Phase 2 or 7.
+7. With Right Ctrl as the dictate key, every Right Ctrl shortcut briefly opens the mic and plays the start cue before cancelling quietly. Part of question 1.
+8. Nothing is recorded after the key is released. If last words get clipped, add a short post-roll (`dictation.tail_ms`), which adds the same time to latency.

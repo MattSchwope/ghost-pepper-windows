@@ -17,4 +17,5 @@ def configure_logging(logs_dir: Path) -> None:
         ],
     )
     # Request lines from the HTTP client add noise without stage timings.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for name in ("httpx", "httpx2"):  # the openai SDK moved to httpx2
+        logging.getLogger(name).setLevel(logging.WARNING)

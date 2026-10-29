@@ -66,3 +66,45 @@ def test_bad_chunk_minutes_rejected():
 def test_missing_config_file_is_clear(tmp_path):
     with pytest.raises(FileNotFoundError, match="Config file not found"):
         load_config(tmp_path / "nope.yaml")
+
+
+def test_example_config_dictation_settings():
+    config = load_config(Path("app/config.example.yaml"))
+    assert config.service_port == 8765
+    assert config.hotkeys.dictate == "RCtrl" and config.hotkeys.cancel == "Esc"
+    assert (config.hotkeys.tap_ms, config.hotkeys.double_tap_ms) == (250, 400)
+    d = config.dictation
+    assert d.audio_prep == "light" and d.upload_format == "flac"
+    assert d.silence_peak_dbfs == -35 and d.min_speech_ms == 200
+    assert d.daily_log is True and d.warm_mic is False and d.sounds is True
+    assert d.max_seconds == 600
+
+
+def test_dictation_defaults_when_sections_missing():
+    config = parse_config({})
+    assert config.service_port == 8765
+    assert config.hotkeys.dictate == "RCtrl"
+    assert config.dictation.audio_prep == "light"
+    assert config.dictation.prewarm_connection is True
+
+
+def test_dictation_bare_off_audio_prep_means_off():
+    raw = yaml.safe_load("dictation:\n  audio_prep: off\n")
+    assert parse_config(raw).dictation.audio_prep == "off"
+
+
+@pytest.mark.parametrize(
+    "raw, match",
+    [
+        ({"dictation": {"audio_prep": "extreme"}}, "dictation.audio_prep"),
+        ({"dictation": {"upload_format": "mp3"}}, "dictation.upload_format"),
+        ({"dictation": {"hands_free_max_minutes": 0}}, "hands_free_max_minutes"),
+        ({"dictation": {"mic_open_timeout_seconds": -1}}, "mic_open_timeout_seconds"),
+        ({"hotkeys": {"tap_ms": 0}}, "hotkeys.tap_ms"),
+        ({"service": {"port": 80}}, "service.port"),
+        ({"service": {"port": 70000}}, "service.port"),
+    ],
+)
+def test_bad_dictation_settings_rejected(raw, match):
+    with pytest.raises(ValueError, match=match):
+        parse_config(raw)
