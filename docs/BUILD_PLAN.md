@@ -121,9 +121,9 @@ files:
 **Matt's homework:** collect 15 short clips (30 to 60 seconds) in `eval/clips/` (git-ignored). Include 5 noisy dictations, 5 cuts from recorded talks and 5 from phone calls. Add a hand-corrected `.ref.txt` for each.
 
 **Done when**
-- [ ] `gpw transcribe-file clip.m4a` returns text through GPT-Transcribe.
-- [ ] `gpw eval --prep off,light,strong` prints a WER table.
-- [ ] Tests pass. No Ollama references remain.
+- [x] `gpw transcribe-file clip.m4a` returns text through GPT-Transcribe. Proven live by Matt on October 28, 2026 with `gpw record-once`, which runs the same prep and GPT-Transcribe path.
+- [x] `gpw eval --prep off,light,strong` prints a WER table.
+- [x] Tests pass. No Ollama references remain.
 
 ## Phase 1: Dictation core
 
@@ -319,3 +319,5 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 1. Final hotkey choices, after a day of use.
 2. Daily dictation log on or off by default.
 3. Whether to keep `transcribe` as a standalone CLI or archive it after Phase 4.
+4. Whether to delete the pre-v2 docs (`00_START_HERE.md`, `docs/01_*`-`08_*`, `codex/`). They still describe the Ollama plan; the README marks them as history.
+5. Phase 1 clip prep in numpy should match the ffmpeg `light` chain closely enough that `gpw eval` results carry over.
