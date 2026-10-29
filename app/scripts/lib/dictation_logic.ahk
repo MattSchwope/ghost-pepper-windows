@@ -97,3 +97,35 @@ JsonUnescape(s) {
     }
     return out
 }
+
+; A hotkey in AutoHotkey syntax as people say it: "^!d" -> "Ctrl+Alt+D".
+HotkeyLabel(hk) {
+    static names := Map("^", "Ctrl", "!", "Alt", "+", "Shift", "#", "Win")
+    label := ""
+    i := 1
+    while (i <= StrLen(hk)) {
+        c := SubStr(hk, i, 1)
+        if names.Has(c)
+            label .= names[c] "+"
+        else if !InStr("~*$<>", c)
+            break
+        i += 1
+    }
+    key := SubStr(hk, i)
+    return label (StrLen(key) = 1 ? StrUpper(key) : key)
+}
+
+; Percent-encode text as UTF-8 for an x-www-form-urlencoded body.
+UriEncode(str) {
+    buf := Buffer(StrPut(str, "UTF-8"))
+    StrPut(str, buf, "UTF-8")
+    out := ""
+    loop buf.Size - 1 {
+        b := NumGet(buf, A_Index - 1, "UChar")
+        if (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || InStr("-._~", Chr(b), true)
+            out .= Chr(b)
+        else
+            out .= Format("%{:02X}", b)
+    }
+    return out
+}

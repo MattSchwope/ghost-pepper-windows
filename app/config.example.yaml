@@ -24,7 +24,7 @@ transcription:
   languages: [en]
   audio_prep: light        # off | light | strong
   chunk_minutes: 10        # long files are cut at pauses near this length (2-40)
-  keywords: []             # names and acronyms sent as hints; moves to dictionary.yaml in Phase 2
+  keywords: []             # extra hints sent with every request; the personal dictionary below is the main list
 
 # Hold-to-talk dictation: `gpw serve` plus app/scripts/hotkey.ahk. Restart from the tray icon after edits.
 service:
@@ -33,6 +33,9 @@ service:
 hotkeys:
   dictate: RCtrl           # hold to talk. Double-tap for hands-free, then tap once to stop
   cancel: Esc              # only caught while recording or transcribing
+  add_word: "^!d"          # Ctrl+Alt+D: add the selected word to the dictionary ("" turns it off).
+                           # AutoHotkey syntax: ^ Ctrl, ! Alt, + Shift, # Win. Use the left Ctrl;
+                           # the right one is the dictate key.
   tap_ms: 250              # a press shorter than this counts as a tap
   double_tap_ms: 400       # the most time allowed between the two taps
 
@@ -50,9 +53,24 @@ dictation:
   paste_restore_ms: 250    # wait this long after pasting before putting the old clipboard back
   prewarm_connection: true # connect to OpenAI on key down, so the upload skips the handshake
 
+# Personal dictionary: terms sent as spelling hints, plus "heard": "Wanted" fixes.
+# `gpw dictionary` shows where it is and whether it has errors.
+dictionary:
+  path: null               # null = <data_dir>/dictionary.yaml, created with examples on first start
+  max_keywords: 100        # terms sent per dictation, top of the list first (the API cap is untested)
+  auto_learn: true         # experimental: after a paste, watch the text field for learn_seconds; if you
+                           # fix a name or acronym (cavaliro -> Kavaliro), save that fix. Reads the
+                           # field through Windows UI Automation; nothing leaves the PC.
+  learn_seconds: 15
+
+# Light cleanup never changes word choice. The rules run locally in well under a millisecond.
 cleanup:
-  enabled: false          # text-model pass after transcription; Phase 2 decides the default
-  prompt_profile: "general_cleanup"
+  remove_fillers: true     # drop um, uh, erm
+  spoken_commands: true    # say "new line" or "new paragraph" to break the text there
+  ai_pass: false           # extra text-model pass (openai.text_model) for punctuation and false starts.
+                           # Adds a round trip to every dictation; its answer is thrown away if it
+                           # changed a word. Leave off while measuring Phase 1 latency.
+  prompt_profile: "dictation_light"
 
 markdown:
   save_notes: true

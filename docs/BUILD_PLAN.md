@@ -178,8 +178,10 @@ replace:                                         # applied after transcription
 
 **Done when**
 - [ ] Dictionary terms are spelled right in at least 95% of eval clips that contain them.
-- [ ] Light cleanup changes no content words, verified by a word-diff test.
+- [x] Light cleanup changes no content words, verified by a word-diff test.
 - [ ] Snippets paste in under 0.3 seconds.
+
+How to check: `gpw dictionary` shows the file and what is sent. `test_light_cleanup_changes_no_content_words` is the word-diff test, and `words_kept()` applies the same check to the text-model pass at run time. Dictionary, light cleanup, add-word and auto-learn landed first (October 28, 2026) so they could be tried alongside the Phase 1 checks; snippets are still to build.
 
 ## Phase 3: Voice-edit selection
 
@@ -326,3 +328,6 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 6. Clipboard history: pasted dictations land in Windows clipboard history (Win+V) and cloud clipboard sync when those are on. Excluding them needs the `ExcludeClipboardContentFromMonitorProcessing` clipboard format. Decide in Phase 2 or 7.
 7. With Right Ctrl as the dictate key, every Right Ctrl shortcut briefly opens the mic and plays the start cue before cancelling quietly. Part of question 1.
 8. Nothing is recorded after the key is released. If last words get clipped, add a short post-roll (`dictation.tail_ms`), which adds the same time to latency.
+9. GPT-Transcribe's keyword cap is untested. `dictionary.max_keywords` defaults to 100. If OpenAI refuses a request with keywords, the service retries once without them, pastes, and shows a tooltip. A live `--live` check could find the real cap.
+10. Auto-learn reads text fields through UI Automation. Querying Chrome or Electron apps (Slack, Teams, new Outlook) switches on their accessibility tree, which can cost some CPU. Which apps it works in shows in the log as `Auto-learn ... app=<exe> paste_found=<true|false>`.
+11. Auto-learn only learns fixes whose new form has a capital letter or digit (names, acronyms), and never a changed number (100 -> 200). A fix like mark -> Marc would turn every later "mark" into "Marc". Remove bad ones from `replace:` in the dictionary.

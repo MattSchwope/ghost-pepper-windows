@@ -28,6 +28,7 @@ class OpenAIConfig:
 class HotkeyConfig:
     dictate: str = "RCtrl"
     cancel: str = "Esc"
+    add_word: str = "^!d"  # AutoHotkey syntax: Ctrl+Alt+D. Empty turns it off.
     tap_ms: int = 250
     double_tap_ms: int = 400
 
@@ -56,6 +57,20 @@ UPLOAD_FORMATS = ("flac", "wav")
 
 
 @dataclass(frozen=True)
+class CleanupConfig:
+    remove_fillers: bool = True
+    spoken_commands: bool = True
+
+
+@dataclass(frozen=True)
+class DictionaryConfig:
+    path: Path | None = None  # None: <data_dir>/dictionary.yaml
+    max_keywords: int = 100
+    auto_learn: bool = False
+    learn_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_dir: Path
     audio_dir: Path
@@ -78,10 +93,16 @@ class AppConfig:
     service_port: int = 8765
     hotkeys: HotkeyConfig = HotkeyConfig()
     dictation: DictationConfig = DictationConfig()
+    cleanup: CleanupConfig = CleanupConfig()
+    dictionary: DictionaryConfig = DictionaryConfig()
 
     @property
     def work_dir(self) -> Path:
         return self.data_dir / ".work"
+
+    @property
+    def dictionary_path(self) -> Path:
+        return self.dictionary.path or self.data_dir / "dictionary.yaml"
 
 
 def _str_list(value: Any) -> list[str]:
@@ -113,6 +134,7 @@ def parse_hotkeys(raw: dict[str, Any]) -> HotkeyConfig:
     return HotkeyConfig(
         dictate=str(raw.get("dictate", d.dictate)).strip() or d.dictate,
         cancel=str(raw.get("cancel", d.cancel)).strip() or d.cancel,
+        add_word=str(raw.get("add_word", d.add_word) or "").strip(),
         tap_ms=_positive(raw.get("tap_ms", d.tap_ms), "hotkeys.tap_ms"),
         double_tap_ms=_positive(raw.get("double_tap_ms", d.double_tap_ms), "hotkeys.double_tap_ms"),
     )
@@ -140,6 +162,17 @@ def parse_dictation(raw: dict[str, Any]) -> DictationConfig:
         sounds=bool(raw.get("sounds", d.sounds)),
         paste_restore_ms=int(raw.get("paste_restore_ms", d.paste_restore_ms)),
         prewarm_connection=bool(raw.get("prewarm_connection", d.prewarm_connection)),
+    )
+
+
+def parse_dictionary_config(raw: dict[str, Any]) -> DictionaryConfig:
+    d = DictionaryConfig()
+    path = raw.get("path")
+    return DictionaryConfig(
+        path=Path(path) if path else None,
+        max_keywords=_positive(raw.get("max_keywords", d.max_keywords), "dictionary.max_keywords"),
+        auto_learn=bool(raw.get("auto_learn", d.auto_learn)),
+        learn_seconds=_positive(raw.get("learn_seconds", d.learn_seconds), "dictionary.learn_seconds", float),
     )
 
 
@@ -192,14 +225,20 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         audio_prep=audio_prep,
         chunk_minutes=chunk_minutes,
         keywords=_str_list(transcription.get("keywords")),
-        cleanup_enabled=bool(cleanup.get("enabled", False)),
-        prompt_profile=str(cleanup.get("prompt_profile", "general_cleanup")),
+        # ai_pass was called enabled before Phase 2; both still work.
+        cleanup_enabled=bool(cleanup.get("ai_pass", cleanup.get("enabled", False))),
+        prompt_profile=str(cleanup.get("prompt_profile", "dictation_light")),
         save_notes=bool(markdown.get("save_notes", True)),
         debug_log_transcripts=bool(privacy.get("debug_log_transcripts", False)),
         delete_audio_after_success=bool(privacy.get("delete_audio_after_success", False)),
         service_port=port,
         hotkeys=parse_hotkeys(raw.get("hotkeys") or {}),
         dictation=parse_dictation(raw.get("dictation") or {}),
+        cleanup=CleanupConfig(
+            remove_fillers=bool(cleanup.get("remove_fillers", True)),
+            spoken_commands=bool(cleanup.get("spoken_commands", True)),
+        ),
+        dictionary=parse_dictionary_config(raw.get("dictionary") or {}),
     )
 
 

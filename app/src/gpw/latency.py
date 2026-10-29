@@ -75,6 +75,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "prep": _median_of(rows, "prep"),
             "record_end": _median_of(rows, "record_end"),
             "paste": _median_of(rows, "paste"),
+            "cleanup": _median_of(rows, "cleanup"),
         }
 
     checked = [r for r in pasted if "clipboard_restored" in r]
@@ -107,6 +108,8 @@ def format_report(summary: dict[str, Any], source: Path) -> str:
         ("  of which OpenAI processing", _fmt(a["server"]), _fmt(t["server"])),
         ("Median paste", _fmt(a["paste"]), _fmt(t["paste"])),
     ]
+    if a["cleanup"] is not None:
+        rows.insert(-1, ("Median text-model cleanup", _fmt(a["cleanup"]), _fmt(t["cleanup"])))
     head = ("", "all clips", f"{low:g}-{high:g} s clips")
     width = max(len(r[0]) for r in rows)
     lines = [
