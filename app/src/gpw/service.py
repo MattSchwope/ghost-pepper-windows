@@ -1,4 +1,4 @@
-"""The always-running dictation service: mic, clip prep, GPT-Transcribe, cleanup, timing logs, daily log.
+"""The always-running dictation service: mic, clip prep, GPT-Transcribe, snippets, cleanup, timing logs, daily log.
 
 The AutoHotkey script drives it over HTTP on 127.0.0.1 (server.py, ADR-003). Transcript
 text goes back to the script and into the daily note, never into the log unless
@@ -26,11 +26,12 @@ from .autolearn import Learner
 from .cleanup import clean_dictation
 from .clip_prep import encode, ffmpeg_filter, prepare_clip
 from .config import AppConfig
-from .dictionary import DictionaryStore
+from .dictionary import DictionaryStore, apply_replacements
 from .engines import TimedText, clean_keywords
 from .latency import append_record
 from .markdown_store import append_daily_dictation
 from .mic import MicCapture, MicError, MicTimeout
+from .snippets import Snippet, SnippetStore, match_snippet, spoken_name
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class DictationService:
         *,
         clean: Callable[[str], str] | None = None,
         dictionary: DictionaryStore | None = None,
+        snippets: SnippetStore | None = None,
         learner: Learner | None = None,
         dry_run: bool = False,
         assets_dir: Path | None = None,
@@ -104,6 +106,7 @@ class DictationService:
         self.mic = mic
         self.clean = clean  # the optional text-model pass (cleanup.ai_pass)
         self.dictionary = dictionary
+        self.snippets = snippets
         self.learner = learner
         self.dry_run = dry_run
         self.assets_dir = assets_dir or config.data_dir / "assets"
@@ -162,6 +165,7 @@ class DictationService:
             "cancel_key": h.cancel,
             "add_word_key": h.add_word,
             "dictionary_path": self.dictionary.path.as_posix() if self.dictionary else "",
+            "snippets_path": self.snippets.path.as_posix() if self.snippets else "",
             "auto_learn": self.learner is not None and self.learner.available,
             "tap_ms": h.tap_ms,
             "double_tap_ms": h.double_tap_ms,
@@ -353,21 +357,30 @@ class DictationService:
             append_record(self.latency_log, record)
             self._post.submit(self._save_audio, dictation_id, raw, rate)
             return StopResult("error", dictation_id, message=friendly_error(exc))
+        transcribed = time.perf_counter()
         self._last_api = time.monotonic()
         record.update(api=_r(timed.api_seconds), server=timed.server_seconds)
 
         raw_text = timed.text
         c = self.config.cleanup
         words = self.dictionary.current() if self.dictionary else None
-        cleaned = clean_dictation(
-            raw_text, words.replace if words else {}, terms=words.terms if words else [],
-            fillers=c.remove_fillers, commands=c.spoken_commands, ai=self.clean,
-        )
-        text = cleaned.text
-        if cleaned.ai_seconds is not None:
-            record.update(cleanup=_r(cleaned.ai_seconds), cleanup_ai=cleaned.ai_status)
-            if cleaned.ai_status == "rejected":
-                logger.warning("Dictation id=%s: the text model changed words, so its cleanup was not used", dictation_id)
+        snippet = self._find_snippet(raw_text, words.replace if words else {})
+        if snippet is not None:
+            text = snippet.text
+            record.update(snippet=True, transcribed=_r(transcribed - released))
+            logger.info("Dictation id=%s matched a snippet", dictation_id)
+        else:
+            if self.snippets is not None and self.snippets.error and spoken_name(raw_text):
+                note = "snippets.yaml has an error, so this may have been a snippet. Run gpw snippets to see it."
+            cleaned = clean_dictation(
+                raw_text, words.replace if words else {}, terms=words.terms if words else [],
+                fillers=c.remove_fillers, commands=c.spoken_commands, ai=self.clean,
+            )
+            text = cleaned.text
+            if cleaned.ai_seconds is not None:
+                record.update(cleanup=_r(cleaned.ai_seconds), cleanup_ai=cleaned.ai_status)
+                if cleaned.ai_status == "rejected":
+                    logger.warning("Dictation id=%s: the text model changed words, so its cleanup was not used", dictation_id)
         if not text.strip():
             return self._skipped(dictation_id, record, "empty_transcript")
 
@@ -391,13 +404,21 @@ class DictationService:
             self._pending[dictation_id] = record
             while len(self._pending) > PENDING_LIMIT:
                 self._pending.popitem(last=False)
-            if self.learner is not None:
+            if self.learner is not None and snippet is None:  # editing a snippet teaches nothing about speech
                 self._texts[dictation_id] = text
                 while len(self._texts) > PENDING_LIMIT:
                     self._texts.popitem(last=False)
         when = datetime.fromisoformat(record["ts"])
-        self._post.submit(self._after_success, dictation_id, raw, rate, text, raw_text, clip.raw_seconds, when)
+        logged = f"[snippet: {snippet.name}]" if snippet is not None else text
+        self._post.submit(self._after_success, dictation_id, raw, rate, logged, raw_text, clip.raw_seconds, when)
         return StopResult("ok", dictation_id, text=text, note=note)
+
+    def _find_snippet(self, raw_text: str, replace: dict[str, str]) -> Snippet | None:
+        if self.snippets is None:
+            return None
+        snippets = self.snippets.current()
+        # Dictionary fixes first, so a misheard name still matches; then as heard, for a name spelled the way it is heard.
+        return match_snippet(apply_replacements(raw_text, replace), snippets) or match_snippet(raw_text, snippets)
 
     def _skipped(self, dictation_id: int, record: dict[str, Any], reason: str) -> StopResult:
         record.update(status="skipped", reason=reason)
@@ -419,6 +440,10 @@ class DictationService:
         record.update(status="pasted", release_to_paste=_r(release_to_paste_ms / 1000), paste=_r(paste_ms / 1000))
         if clipboard_restored is not None:
             record["clipboard_restored"] = clipboard_restored
+        if record.get("snippet"):
+            # The local part of a snippet. Tiny clock gaps between the script and the service can make it just below 0.
+            record["transcript_to_paste"] = _r(max(0.0, record["release_to_paste"] - record["transcribed"]))
+            logger.info("Dictation id=%s snippet transcript_to_paste=%.3fs", dictation_id, record["transcript_to_paste"])
         append_record(self.latency_log, record)
         logger.info(
             "Dictation id=%s pasted release_to_paste=%.2fs paste=%.3fs clipboard_restored=%s",

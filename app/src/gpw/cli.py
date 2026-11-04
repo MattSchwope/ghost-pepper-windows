@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("dictionary", help="Show the personal dictionary: where it is, what is sent, any errors")
 
+    subparsers.add_parser("snippets", help="Show the snippets: where the file is, the names you can say, any errors")
+
     return parser
 
 
@@ -68,6 +70,12 @@ def _dictionary(config: AppConfig):
     from .dictionary import DictionaryStore
 
     return DictionaryStore(config.dictionary_path, config.keywords, config.dictionary.max_keywords)
+
+
+def _snippets(config: AppConfig):
+    from .snippets import SnippetStore
+
+    return SnippetStore(config.snippets_path)
 
 
 def _cue(message: str, beep_hz: int) -> None:
@@ -213,6 +221,9 @@ def build_service(config: AppConfig, dry_run: bool):
     dictionary = _dictionary(config)
     dictionary.ensure_file()
     dictionary.current()  # logs the counts, or the error, at startup
+    snippets = _snippets(config)
+    snippets.ensure_file()
+    snippets.current()
     if dry_run:
         engine = DryRunEngine()
     else:
@@ -242,7 +253,8 @@ def build_service(config: AppConfig, dry_run: bool):
         learner = Learner(dictionary, UIAReader, config.dictionary.learn_seconds, log_text=config.debug_log_transcripts)
     assets = write_assets(config.data_dir / "assets")
     return DictationService(
-        config, engine, mic, clean=clean, dictionary=dictionary, learner=learner, dry_run=dry_run, assets_dir=assets,
+        config, engine, mic, clean=clean, dictionary=dictionary, snippets=snippets, learner=learner,
+        dry_run=dry_run, assets_dir=assets,
     )
 
 
@@ -302,6 +314,23 @@ def run_dictionary(config: AppConfig) -> int:
     return 0
 
 
+def run_snippets(config: AppConfig) -> int:
+    store = _snippets(config)
+    if store.ensure_file():
+        sys.stdout.write("Created a starter snippets file.\n")
+    current = store.current()
+    sys.stdout.write(f"Snippets: {store.path}\nCount: {len(current)}\n")
+    if current:
+        sys.stdout.write("Say one of these as the whole dictation:\n")
+        for spoken in sorted(current):
+            sys.stdout.write(f'  "insert {spoken}"\n')
+    if store.error:
+        sys.stdout.write(f"Error: {store.error}\nDictation pastes the words instead of a snippet until this is fixed.\n")
+        return 1
+    sys.stdout.write("No errors. Edit it in any text editor; the next dictation picks up the change.\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -320,6 +349,8 @@ def main(argv: list[str] | None = None) -> None:
             code = run_latency(config, args.last)
         elif args.command == "dictionary":
             code = run_dictionary(config)
+        elif args.command == "snippets":
+            code = run_snippets(config)
         else:
             code = 1
     except (FileNotFoundError, RuntimeError, ValueError) as exc:

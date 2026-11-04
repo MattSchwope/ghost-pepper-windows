@@ -19,9 +19,10 @@ HEADERS = {"X-GPW-Client": "test"}
 def running(tmp_path):
     started = []
 
-    def start(engine=None, mic=None, dictionary=None, learner=None):
+    def start(engine=None, mic=None, dictionary=None, snippets=None, learner=None):
         service = DictationService(
-            make_config(tmp_path), engine or FakeEngine(), mic or FakeMic(), dictionary=dictionary, learner=learner,
+            make_config(tmp_path), engine or FakeEngine(), mic or FakeMic(), dictionary=dictionary, snippets=snippets,
+            learner=learner,
         )
         server = make_server(service, 0)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
@@ -183,3 +184,37 @@ def test_note_header_when_dictionary_hints_were_dropped(running, tmp_path):
     response, _ = request(server, "POST", "/stop")
     assert response.getheader("X-Dictation-Status") == "ok"
     assert "dictionary hints" in response.getheader("X-Dictation-Note")
+
+
+def test_snippet_comes_back_well_inside_the_paste_target(running, tmp_path):
+    """Phase 2 check, as far as it goes without a live run: from the transcript arriving to the text
+    being in the hotkey script's hands, over a real socket, with a long snippet and a big file."""
+    import time
+
+    import yaml
+
+    from gpw.snippets import SnippetStore
+
+    long_text = "\n".join(f"Line {i} of a long multi-line snippet, “quoted” – café." for i in range(200))
+    path = tmp_path / "snippets.yaml"
+    path.write_text(
+        yaml.safe_dump({"signature": long_text, **{f"name {i}": f"Text {i}" for i in range(500)}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    class Timed(FakeEngine):
+        def transcribe_clip(self, *args, **kwargs):
+            result = super().transcribe_clip(*args, **kwargs)
+            self.returned = time.perf_counter()
+            return result
+
+    engine = Timed(text="Insert signature.")
+    server, _ = running(engine=engine, snippets=SnippetStore(path))
+    elapsed = []
+    for _ in range(5):
+        request(server, "POST", "/start")
+        response, data = request(server, "POST", "/stop", "mode=hold")
+        elapsed.append(time.perf_counter() - engine.returned)
+        assert response.getheader("X-Dictation-Status") == "ok"
+        assert data.decode("utf-8") == long_text
+    assert sorted(elapsed)[2] < 0.3

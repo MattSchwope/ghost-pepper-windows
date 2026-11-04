@@ -181,7 +181,9 @@ replace:                                         # applied after transcription
 - [x] Light cleanup changes no content words, verified by a word-diff test.
 - [ ] Snippets paste in under 0.3 seconds.
 
-How to check: `gpw dictionary` shows the file and what is sent. `test_light_cleanup_changes_no_content_words` is the word-diff test, and `words_kept()` applies the same check to the text-model pass at run time. Dictionary, light cleanup, add-word and auto-learn landed first (October 28, 2026) so they could be tried alongside the Phase 1 checks; snippets are still to build.
+How to check: `gpw dictionary` shows the file and what is sent. `test_light_cleanup_changes_no_content_words` is the word-diff test, and `words_kept()` applies the same check to the text-model pass at run time. Dictionary, light cleanup, add-word and auto-learn landed first (October 28, 2026) so they could be tried alongside the Phase 1 checks; snippets followed on November 4, 2026.
+
+For snippets, `gpw latency` reports `transcript_to_paste` against the 0.3-second target, plus release-to-paste for the same dictations. See open question 12 for why those differ. `test_snippet_comes_back_well_inside_the_paste_target` covers the service side. The box stays open until real pastes are in the log.
 
 ## Phase 3: Voice-edit selection
 
@@ -331,3 +333,5 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 9. GPT-Transcribe's keyword cap is untested. `dictionary.max_keywords` defaults to 100. If OpenAI refuses a request with keywords, the service retries once without them, pastes, and shows a tooltip. A live `--live` check could find the real cap.
 10. Auto-learn reads text fields through UI Automation. Querying Chrome or Electron apps (Slack, Teams, new Outlook) switches on their accessibility tree, which can cost some CPU. Which apps it works in shows in the log as `Auto-learn ... app=<exe> paste_found=<true|false>`.
 11. Auto-learn only learns fixes whose new form has a capital letter or digit (names, acronyms), and never a changed number (100 -> 200). A fix like mark -> Marc would turn every later "mark" into "Marc". Remove bad ones from `replace:` in the dictionary.
+12. "Snippets paste in under 0.3 seconds" can only hold from the transcript to the paste. The phrase has to reach GPT-Transcribe first, and short clips took a median of about 1.5 seconds there in the first live logs. Measuring from key release would need a way around speech, such as a hotkey per snippet, or a faster transcript from Phase 1b or Phase 6.
+13. Snippets fire only when "insert <name>" is the whole dictation. "Thanks for your time. Insert signature." stays as words. Firing on a sentence of its own inside a longer dictation would be handy for email sign-offs, at some risk of accidental fires.

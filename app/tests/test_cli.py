@@ -208,3 +208,32 @@ def test_build_service_sets_up_the_dictionary_and_skips_auto_learn_in_dry_runs(t
         assert service.dictionary is not None and service.learner is None
     finally:
         service.close()
+
+
+def test_snippets_command_creates_the_file_and_lists_what_to_say(tmp_path, config_file, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "snippets"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "Created a starter snippets file." in out and "Count: 1" in out and '"insert signature"' in out
+    assert "Your Title" not in out
+    path = tmp_path / "data" / "snippets.yaml"
+    assert path.is_file()
+
+    path.write_text("signature: [oops", encoding="utf-8")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--config", str(config_file), "snippets"])
+    assert exit_info.value.code == 1
+    assert "Error:" in capsys.readouterr().out
+
+
+def test_build_service_sets_up_snippets(tmp_path, config_file, monkeypatch):
+    from gpw.config import load_config
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    service = cli.build_service(load_config(config_file), dry_run=True)
+    try:
+        assert (tmp_path / "data" / "snippets.yaml").is_file()
+        assert service.snippets is not None and "signature" in service.snippets.current()
+    finally:
+        service.close()

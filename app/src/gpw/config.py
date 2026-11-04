@@ -71,6 +71,11 @@ class DictionaryConfig:
 
 
 @dataclass(frozen=True)
+class SnippetsConfig:
+    path: Path | None = None  # None: <data_dir>/snippets.yaml
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_dir: Path
     audio_dir: Path
@@ -95,6 +100,7 @@ class AppConfig:
     dictation: DictationConfig = DictationConfig()
     cleanup: CleanupConfig = CleanupConfig()
     dictionary: DictionaryConfig = DictionaryConfig()
+    snippets: SnippetsConfig = SnippetsConfig()
 
     @property
     def work_dir(self) -> Path:
@@ -103,6 +109,10 @@ class AppConfig:
     @property
     def dictionary_path(self) -> Path:
         return self.dictionary.path or self.data_dir / "dictionary.yaml"
+
+    @property
+    def snippets_path(self) -> Path:
+        return self.snippets.path or self.data_dir / "snippets.yaml"
 
 
 def _str_list(value: Any) -> list[str]:
@@ -176,6 +186,11 @@ def parse_dictionary_config(raw: dict[str, Any]) -> DictionaryConfig:
     )
 
 
+def parse_snippets_config(raw: dict[str, Any]) -> SnippetsConfig:
+    path = raw.get("path")
+    return SnippetsConfig(path=Path(path) if path else None)
+
+
 def parse_config(raw: dict[str, Any]) -> AppConfig:
     app = raw.get("app") or {}
     recording = raw.get("recording") or {}
@@ -239,6 +254,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
             spoken_commands=bool(cleanup.get("spoken_commands", True)),
         ),
         dictionary=parse_dictionary_config(raw.get("dictionary") or {}),
+        snippets=parse_snippets_config(raw.get("snippets") or {}),
     )
 
 

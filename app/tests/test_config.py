@@ -150,3 +150,11 @@ def test_example_config_turns_on_the_phase_2_extras_but_not_the_ai_pass():
     assert config.dictionary.auto_learn is True and config.dictionary.path is None
     assert config.cleanup_enabled is False and config.prompt_profile == "dictation_light"
     assert config.hotkeys.add_word == "^!d"
+    assert config.snippets.path is None
+
+
+def test_snippets_path_defaults_to_the_data_folder_and_can_move(tmp_path):
+    data = tmp_path / "data"
+    assert parse_config({"app": {"data_dir": str(data)}}).snippets_path == data / "snippets.yaml"
+    moved = parse_config({"app": {"data_dir": str(data)}, "snippets": {"path": str(tmp_path / "shared.yaml")}})
+    assert moved.snippets_path == tmp_path / "shared.yaml"

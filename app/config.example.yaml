@@ -63,6 +63,11 @@ dictionary:
                            # field through Windows UI Automation; nothing leaves the PC.
   learn_seconds: 15
 
+# Snippets: say "insert <name>" as the whole dictation to paste canned text exactly as written.
+# `gpw snippets` shows where the file is, the names you can say and whether it has errors.
+snippets:
+  path: null               # null = <data_dir>/snippets.yaml, created with an example on first start
+
 # Light cleanup never changes word choice. The rules run locally in well under a millisecond.
 cleanup:
   remove_fillers: true     # drop um, uh, erm

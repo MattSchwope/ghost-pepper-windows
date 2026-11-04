@@ -9,6 +9,7 @@
 ;   Double-tap RCtrl: hands-free. Tap RCtrl once more to stop and paste.
 ;   Esc while recording or transcribing: cancel.
 ;   Ctrl+Alt+D with a word selected: add it to the personal dictionary.
+;   Say "insert signature" as a whole dictation: the service answers with that snippet's text.
 ; Keys and timings come from config.yaml (hotkeys:, dictation:) through the service's /health.
 ; Start it with app\scripts\start_dictation.ps1. Pass --dry-run to paste a fixed sentence
 ; instead of calling OpenAI.
@@ -38,6 +39,7 @@ DictateKeyName := "RControl"
 CancelKey := "Esc"
 AddWordKey := ""
 DictionaryPath := ""
+SnippetsPath := ""
 TapMs := 250
 DoubleTapMs := 400
 MaxMs := 600000
@@ -124,6 +126,7 @@ LoadSettings(health) {
     CancelKey := JsonValue(health, "cancel_key", "Esc")
     AddWordKey := JsonValue(health, "add_word_key", "")
     DictionaryPath := StrReplace(JsonValue(health, "dictionary_path"), "/", "\")
+    SnippetsPath := StrReplace(JsonValue(health, "snippets_path"), "/", "\")
     TapMs := Integer(JsonValue(health, "tap_ms", 250))
     DoubleTapMs := Integer(JsonValue(health, "double_tap_ms", 400))
     MaxMs := Integer(JsonValue(health, "max_seconds", 600)) * 1000
@@ -275,7 +278,7 @@ PasteAndReport(text, id, note := "") {
     try {
         gotTick := A_TickCount
         saved := ClipboardAll()
-        A_Clipboard := text
+        A_Clipboard := ClipboardText(text)
         if !ClipWait(1)
             throw Error("the clipboard did not take the text")
         Send("^v")
@@ -357,6 +360,7 @@ SetupTray() {
     A_TrayMenu.Delete()
     A_TrayMenu.Add("Open today's dictation log", OpenDailyLog)
     A_TrayMenu.Add("Open dictionary", OpenDictionary)
+    A_TrayMenu.Add("Open snippets", OpenSnippets)
     A_TrayMenu.Add("Open log folder", OpenLogs)
     A_TrayMenu.Add()
     A_TrayMenu.Add("Restart (reloads config)", RestartAll)
@@ -398,6 +402,13 @@ OpenDictionary(*) {
         Run('notepad.exe "' DictionaryPath '"')  ; .yaml has no default app on most PCs
     else
         ShowTip("No dictionary file yet. It is created when the service starts.", 2500)
+}
+
+OpenSnippets(*) {
+    if (SnippetsPath != "" && FileExist(SnippetsPath))
+        Run('notepad.exe "' SnippetsPath '"')
+    else
+        ShowTip("No snippets file yet. It is created when the service starts.", 2500)
 }
 
 OpenLogs(*) {

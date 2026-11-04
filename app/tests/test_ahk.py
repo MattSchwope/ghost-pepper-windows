@@ -48,7 +48,8 @@ def test_hotkey_http_client_against_the_real_server(tmp_path):
     from gpw.service import DictationService
     from test_service import FakeEngine, FakeMic, make_config
 
-    text = "Café at 9 – “quoted” ✓"
+    first_line, second_line = "Café at 9 – “quoted” ✓", "A second line, as snippets have"
+    text = f"{first_line}\n{second_line}"
     gate = threading.Event()
 
     class SlowSecondEngine(FakeEngine):
@@ -78,7 +79,8 @@ def test_hotkey_http_client_against_the_real_server(tmp_path):
         "health 200 gpw RCtrl",
         "start 200 1",
         "stop 200 ok 1",
-        f"text {text}",
+        f"text {first_line}",
+        second_line,
         "pasted 200 true",
         "aborted yes",
         "cancel 200 cancelled",

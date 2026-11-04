@@ -101,5 +101,10 @@ Check("encode plain", UriEncode("Kavaliro"), "Kavaliro")
 Check("encode reserved", UriEncode("TS/SCI & CI Poly+1"), "TS%2FSCI%20%26%20CI%20Poly%2B1")
 Check("encode utf-8", UriEncode("Zoë"), "Zo%C3%AB")
 
+; Line breaks on the clipboard
+Check("clipboard: LF becomes CRLF", ClipboardText("Matt`nKavaliro`n`nCall me"), "Matt`r`nKavaliro`r`n`r`nCall me")
+Check("clipboard: CRLF stays as it is", ClipboardText("a`r`nb"), "a`r`nb")
+Check("clipboard: one line untouched", ClipboardText("one line"), "one line")
+
 FileAppend(Failures ? Failures " failed`n" : "ALL PASSED`n", "*")
 ExitApp(Failures ? 1 : 0)

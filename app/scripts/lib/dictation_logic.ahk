@@ -98,6 +98,10 @@ JsonUnescape(s) {
     return out
 }
 
+; Text as Windows apps expect it on the clipboard: every line break is CR LF. A bare LF can
+; run lines together in some apps, and snippets and "new line" both rely on the breaks.
+ClipboardText(text) => StrReplace(StrReplace(text, "`r`n", "`n"), "`n", "`r`n")
+
 ; A hotkey in AutoHotkey syntax as people say it: "^!d" -> "Ctrl+Alt+D".
 HotkeyLabel(hk) {
     static names := Map("^", "Ctrl", "!", "Alt", "+", "Shift", "#", "Win")

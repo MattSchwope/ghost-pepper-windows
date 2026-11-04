@@ -79,3 +79,30 @@ def test_report_shows_text_model_cleanup_only_when_used(tmp_path):
     assert "text-model cleanup" not in plain
     with_ai = format_report(summarize([pasted(10.0, 2.0, cleanup=0.6)]), tmp_path / "x.jsonl")
     assert "Median text-model cleanup" in with_ai and "0.60s" in with_ai
+
+
+def test_snippets_report_the_local_part_against_their_target(tmp_path):
+    records = [
+        pasted(1.5, 1.5, snippet=True, transcribed=1.45, transcript_to_paste=0.05),
+        pasted(1.4, 1.7, snippet=True, transcribed=1.6, transcript_to_paste=0.1),
+        pasted(1.6, 1.6, snippet=True, transcribed=1.58, transcript_to_paste=0.02),
+        pasted(10.0, 1.3),
+    ]
+    s = summarize(records)["snippets"]
+    assert (s["count"], s["median"], s["slowest"]) == (3, 0.05, 0.1)
+    assert s["release_to_paste"] == 1.6
+    report = format_report(summarize(records), tmp_path / "log.jsonl")
+    assert "Phase 2 target: snippets paste in under 0.3 s" in report
+    assert "median 0.050 s, slowest 0.100 s, over 3 -> met." in report
+    assert "median 1.60s, which includes OpenAI" in report
+
+
+def test_slow_snippets_miss_and_no_snippets_say_nothing(tmp_path):
+    slow = [pasted(1.5, 2.0, snippet=True, transcribed=1.5, transcript_to_paste=0.5)]
+    assert "over 1 -> missed." in format_report(summarize(slow), tmp_path / "log.jsonl")
+    assert "Phase 2 target" not in format_report(summarize([pasted(10.0, 1.3)]), tmp_path / "log.jsonl")
+
+
+def test_dry_run_snippets_do_not_count():
+    records = [pasted(1.5, 0.08, api=0.0, snippet=True, transcribed=0.0, transcript_to_paste=0.08)]
+    assert summarize(records)["snippets"]["count"] == 0

@@ -60,6 +60,7 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 | `gpw serve` | The always-running dictation service the hotkey script talks to, on 127.0.0.1 only. `--dry-run` pastes a fixed sentence instead of calling OpenAI. Normally started for you by the hotkey script |
 | `gpw latency` | Release-to-paste report from the dictation timing log: median, 90th percentile, and where the time goes. `--last 50` for the most recent 50 |
 | `gpw dictionary` | Shows where the personal dictionary is, how many terms and fixes it has, how many terms go out with each dictation, and any error in the file. Creates a starter file if there is none |
+| `gpw snippets` | Shows where the snippets file is, the phrases you can say, and any error in the file. Creates a starter file if there is none |
 
 The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
 
@@ -80,8 +81,9 @@ A green dot appears in the system tray, and the script starts the Python service
 | Esc while recording or transcribing | Cancels. Nothing is pasted |
 | Right Ctrl plus another key (Ctrl+C) | Works as normal; the recording is dropped quietly |
 | Select a word, press Ctrl+Alt+D (left Ctrl) | Adds it to the personal dictionary |
+| Hold Right Ctrl, say "insert signature", let go | Pastes that snippet |
 
-The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Right-click it for today's dictation log, the dictionary, the log folder, Restart (after config changes) and Exit.
+The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Right-click it for today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
 
 - Clips with no speech are skipped: no API call and no paste.
 - Every dictation is appended to `C:\GhostPepperWindows\notes\dictation\YYYY-MM-DD.md` (`dictation.daily_log`).
@@ -103,6 +105,24 @@ Cleanup never changes word choice:
 - `cleanup.remove_fillers` drops um, uh and erm.
 - `cleanup.spoken_commands`: say "new line" or "new paragraph" to break the text there. "a new line of credit" stays as words.
 - `cleanup.ai_pass` (off by default) adds a text-model pass for punctuation and false starts. It adds a round trip, and its answer is thrown away if it changed, added or reordered a word.
+
+### Snippets
+
+`C:\GhostPepperWindows\snippets.yaml` is created with an example the first time the service starts. Open it from the tray menu. Changes apply to the next dictation, with no restart.
+
+```yaml
+signature: |
+  Your Name
+  Your Title
+outreach: "One line works too. Use quotes if it contains a colon."
+```
+
+- Say "insert <name>" as the whole dictation. Case, punctuation and um or uh don't matter, so "Um, Insert signature." works.
+- Anything else stays as words: "please insert signature here", or "Thanks. Insert signature." as one dictation. A name with no snippet is pasted as words too. To add a signature after a sentence, dictate the sentence first and the snippet second.
+- The text is pasted exactly as written, with several lines if it has them. No dictionary fixes, cleanup or text model touch it, and auto-learn does not watch it.
+- OpenAI still has to hear the phrase, so release to paste takes about as long as any short dictation. Everything after the transcript is local. `gpw latency` reports both times.
+- If a name keeps being misheard, add it to `terms:` in the dictionary, or add a fix to `replace:`.
+- The daily log records `[snippet: <name>]` and what was heard, not the snippet's text.
 
 ## Success definition
 
