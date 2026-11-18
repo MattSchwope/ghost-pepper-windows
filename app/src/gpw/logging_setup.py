@@ -16,5 +16,6 @@ def configure_logging(logs_dir: Path) -> None:
             logging.StreamHandler(),
         ],
     )
-    # Request lines from the HTTP client add noise without stage timings.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Request lines from the HTTP client, and comtypes cache notes from auto-learn, add noise without stage timings.
+    for name in ("httpx", "httpx2", "comtypes"):  # the openai SDK moved to httpx2
+        logging.getLogger(name).setLevel(logging.WARNING)

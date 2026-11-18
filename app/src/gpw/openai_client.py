@@ -38,11 +38,21 @@ def require_api_key(env_name: str) -> str:
     return key
 
 
-def make_client(cfg: OpenAIConfig) -> OpenAI:
+def make_client(cfg: OpenAIConfig, keepalive_seconds: float | None = None) -> OpenAI:
+    """`keepalive_seconds` keeps an idle HTTPS connection for reuse (the SDK default drops it after 5 s)."""
     from openai import OpenAI
 
+    kwargs = {}
+    if keepalive_seconds:
+        import httpx2
+        from openai import DefaultHttpxClient
+
+        kwargs["http_client"] = DefaultHttpxClient(
+            limits=httpx2.Limits(max_connections=20, max_keepalive_connections=5, keepalive_expiry=keepalive_seconds)
+        )
     return OpenAI(
         api_key=require_api_key(cfg.api_key_env),
         max_retries=cfg.max_retries,
         timeout=cfg.timeout_seconds,
+        **kwargs,
     )

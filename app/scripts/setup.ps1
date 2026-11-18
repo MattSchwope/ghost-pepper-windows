@@ -27,3 +27,4 @@ if ((Test-Path ".env") -and (Select-String -Path ".env" -Pattern "^OPENAI_API_KE
 Write-Host "Setup complete."
 Write-Host "Try: .\.venv\Scripts\gpw.exe --help"
 Write-Host "Then: .\.venv\Scripts\gpw.exe transcribe-file path\to\clip.m4a"
+Write-Host "Dictation: .\app\scripts\start_dictation.ps1 (hold Right Ctrl, talk, let go)"

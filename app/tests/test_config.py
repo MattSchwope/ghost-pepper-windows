@@ -66,3 +66,95 @@ def test_bad_chunk_minutes_rejected():
 def test_missing_config_file_is_clear(tmp_path):
     with pytest.raises(FileNotFoundError, match="Config file not found"):
         load_config(tmp_path / "nope.yaml")
+
+
+def test_example_config_dictation_settings():
+    config = load_config(Path("app/config.example.yaml"))
+    assert config.service_port == 8765
+    assert config.hotkeys.dictate == "RCtrl" and config.hotkeys.cancel == "Esc"
+    assert (config.hotkeys.tap_ms, config.hotkeys.double_tap_ms) == (250, 400)
+    d = config.dictation
+    assert d.audio_prep == "light" and d.upload_format == "flac"
+    assert d.silence_peak_dbfs == -35 and d.min_speech_ms == 200
+    assert d.daily_log is True and d.warm_mic is False and d.sounds is True
+    assert d.max_seconds == 600
+
+
+def test_dictation_defaults_when_sections_missing():
+    config = parse_config({})
+    assert config.service_port == 8765
+    assert config.hotkeys.dictate == "RCtrl"
+    assert config.dictation.audio_prep == "light"
+    assert config.dictation.prewarm_connection is True
+
+
+def test_dictation_bare_off_audio_prep_means_off():
+    raw = yaml.safe_load("dictation:\n  audio_prep: off\n")
+    assert parse_config(raw).dictation.audio_prep == "off"
+
+
+@pytest.mark.parametrize(
+    "raw, match",
+    [
+        ({"dictation": {"audio_prep": "extreme"}}, "dictation.audio_prep"),
+        ({"dictation": {"upload_format": "mp3"}}, "dictation.upload_format"),
+        ({"dictation": {"hands_free_max_minutes": 0}}, "hands_free_max_minutes"),
+        ({"dictation": {"mic_open_timeout_seconds": -1}}, "mic_open_timeout_seconds"),
+        ({"hotkeys": {"tap_ms": 0}}, "hotkeys.tap_ms"),
+        ({"service": {"port": 80}}, "service.port"),
+        ({"service": {"port": 70000}}, "service.port"),
+    ],
+)
+def test_bad_dictation_settings_rejected(raw, match):
+    with pytest.raises(ValueError, match=match):
+        parse_config(raw)
+
+
+def test_phase_2_defaults():
+    config = parse_config({"app": {"data_dir": "D:/GP"}})
+    assert config.hotkeys.add_word == "^!d"
+    assert config.cleanup.remove_fillers is True and config.cleanup.spoken_commands is True
+    assert config.cleanup_enabled is False and config.prompt_profile == "dictation_light"
+    assert config.dictionary_path == Path("D:/GP/dictionary.yaml")
+    assert config.dictionary.max_keywords == 100 and config.dictionary.auto_learn is False
+    assert config.dictionary.learn_seconds == 15.0
+
+
+def test_phase_2_settings():
+    config = parse_config({
+        "hotkeys": {"add_word": ""},
+        "cleanup": {"remove_fillers": False, "spoken_commands": False, "ai_pass": True},
+        "dictionary": {"path": "E:/words.yaml", "max_keywords": 20, "auto_learn": True, "learn_seconds": 8},
+    })
+    assert config.hotkeys.add_word == ""
+    assert config.cleanup.remove_fillers is False and config.cleanup.spoken_commands is False
+    assert config.cleanup_enabled is True
+    assert config.dictionary_path == Path("E:/words.yaml")
+    assert config.dictionary.max_keywords == 20 and config.dictionary.auto_learn is True
+    assert config.dictionary.learn_seconds == 8.0
+
+
+def test_cleanup_enabled_still_works_as_the_ai_pass_switch():
+    assert parse_config({"cleanup": {"enabled": True}}).cleanup_enabled is True
+    assert parse_config({"cleanup": {"enabled": True, "ai_pass": False}}).cleanup_enabled is False
+
+
+@pytest.mark.parametrize("section", [{"max_keywords": 0}, {"learn_seconds": -1}])
+def test_bad_dictionary_settings_fail_clearly(section):
+    with pytest.raises(ValueError, match="dictionary"):
+        parse_config({"dictionary": section})
+
+
+def test_example_config_turns_on_the_phase_2_extras_but_not_the_ai_pass():
+    config = load_config(Path("app/config.example.yaml"))
+    assert config.dictionary.auto_learn is True and config.dictionary.path is None
+    assert config.cleanup_enabled is False and config.prompt_profile == "dictation_light"
+    assert config.hotkeys.add_word == "^!d"
+    assert config.snippets.path is None
+
+
+def test_snippets_path_defaults_to_the_data_folder_and_can_move(tmp_path):
+    data = tmp_path / "data"
+    assert parse_config({"app": {"data_dir": str(data)}}).snippets_path == data / "snippets.yaml"
+    moved = parse_config({"app": {"data_dir": str(data)}, "snippets": {"path": str(tmp_path / "shared.yaml")}})
+    assert moved.snippets_path == tmp_path / "shared.yaml"

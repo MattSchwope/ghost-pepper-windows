@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import re
 
@@ -50,4 +50,40 @@ def save_dictation_note(
         render_dictation_note(raw_text, cleaned_text, audio_path, profile),
         encoding="utf-8",
     )
+    return path
+
+
+def daily_log_path(notes_dir: Path, day: date) -> Path:
+    return notes_dir / "dictation" / f"{day.isoformat()}.md"
+
+
+def render_daily_header(day: date) -> str:
+    return f"---\ntype: dictation-log\ndate: {day.isoformat()}\n---\n\n# Dictation {day.isoformat()}\n"
+
+
+def render_daily_entry(when: datetime, text: str, raw_text: str | None = None, seconds: float | None = None) -> str:
+    heading = f"## {when:%H:%M:%S}"
+    if seconds is not None:
+        heading += f" ({seconds:.0f} s)"
+    entry = f"\n{heading}\n\n{text.strip()}\n"
+    if raw_text and raw_text.strip() != text.strip():
+        entry += f"\n**Raw transcript:** {raw_text.strip()}\n"
+    return entry
+
+
+def append_daily_dictation(
+    notes_dir: Path,
+    when: datetime,
+    text: str,
+    raw_text: str | None = None,
+    seconds: float | None = None,
+) -> Path:
+    """Append one dictation to notes/dictation/YYYY-MM-DD.md, creating the day's file with a header."""
+    path = daily_log_path(notes_dir, when.date())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not path.exists()
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        if is_new:
+            f.write(render_daily_header(when.date()))
+        f.write(render_daily_entry(when, text, raw_text, seconds))
     return path

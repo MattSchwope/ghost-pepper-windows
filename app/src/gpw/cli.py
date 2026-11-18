@@ -32,6 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--results", default=str(REPO_ROOT / "eval" / "results"), help="Where hypotheses are cached")
     ev.add_argument("--fresh", action="store_true", help="Ignore cached hypotheses and call the API again")
 
+    srv = subparsers.add_parser("serve", help="Run the dictation service the hotkey script talks to (127.0.0.1 only)")
+    srv.add_argument("--port", type=int, default=None, help="Port on 127.0.0.1 (default: service.port in the config)")
+    srv.add_argument("--dry-run", action="store_true", help="Paste a fixed sentence instead of calling OpenAI")
+
+    lat = subparsers.add_parser("latency", help="Report release-to-paste times from the dictation timing log")
+    lat.add_argument("--last", type=int, default=None, help="Only the most recent N dictations")
+
+    subparsers.add_parser("dictionary", help="Show the personal dictionary: where it is, what is sent, any errors")
+
+    subparsers.add_parser("snippets", help="Show the snippets: where the file is, the names you can say, any errors")
+
     return parser
 
 
@@ -55,6 +66,18 @@ def _engine(config: AppConfig):
     return OpenAIEngine(make_client(config.openai), config.openai.transcribe_model)
 
 
+def _dictionary(config: AppConfig):
+    from .dictionary import DictionaryStore
+
+    return DictionaryStore(config.dictionary_path, config.keywords, config.dictionary.max_keywords)
+
+
+def _snippets(config: AppConfig):
+    from .snippets import SnippetStore
+
+    return SnippetStore(config.snippets_path)
+
+
 def _cue(message: str, beep_hz: int) -> None:
     """Show and sound a recording cue. Goes to stderr so stdout stays transcript-only."""
     sys.stderr.write(message + "\n")
@@ -76,7 +99,6 @@ def run_pipeline(
     context: str | None = None,
 ) -> int:
     from .cleaner import clean_text, load_prompt
-    from .engines import clean_keywords
     from .longform import transcribe_file
     from .markdown_store import save_dictation_note
 
@@ -102,7 +124,7 @@ def run_pipeline(
         config.work_dir,
         prep=prep or config.audio_prep,
         chunk_minutes=config.chunk_minutes,
-        keywords=clean_keywords(config.keywords),
+        keywords=_dictionary(config).keywords(),
         languages=config.languages,
         context=context,
     )
@@ -154,7 +176,6 @@ def run_pipeline(
 
 def run_eval_command(config: AppConfig, clips_dir: Path, prep_arg: str, results_dir: Path, fresh: bool) -> int:
     from .audio import PREP_LEVELS
-    from .engines import clean_keywords
     from .evaluation import discover_clips, format_table, parse_prep_list, run_eval
     from .longform import transcribe_file
 
@@ -172,7 +193,7 @@ def run_eval_command(config: AppConfig, clips_dir: Path, prep_arg: str, results_
         return 1
 
     engine = _engine(config)
-    keywords = clean_keywords(config.keywords)
+    keywords = _dictionary(config).keywords()
 
     def transcribe(path: Path, prep: str) -> str:
         return transcribe_file(
@@ -188,6 +209,128 @@ def run_eval_command(config: AppConfig, clips_dir: Path, prep_arg: str, results_
     return 0 if len(results) == len(clips) * len(preps) else 1
 
 
+def build_service(config: AppConfig, dry_run: bool):
+    from .assets import write_assets
+    from .engines import DryRunEngine, OpenAIEngine
+    from .mic import MicCapture
+    from .openai_client import make_client
+    from .service import DictationService
+
+    d = config.dictation
+    clean = None
+    dictionary = _dictionary(config)
+    dictionary.ensure_file()
+    dictionary.current()  # logs the counts, or the error, at startup
+    snippets = _snippets(config)
+    snippets.ensure_file()
+    snippets.current()
+    if dry_run:
+        engine = DryRunEngine()
+    else:
+        # A long keep-alive lets the prewarmed connection survive a long dictation.
+        client = make_client(config.openai, keepalive_seconds=120)
+        engine = OpenAIEngine(client, config.openai.transcribe_model)
+        if config.cleanup_enabled:
+            from .cleaner import clean_text, load_prompt
+            from .text_client import OpenAITextClient
+
+            text_client = OpenAITextClient(client, config.openai.text_model, config.openai.text_reasoning)
+            prompt = load_prompt(PROMPT_DIR, config.prompt_profile)
+            clean = lambda text: clean_text(text_client, text, prompt)  # noqa: E731
+    mic = MicCapture(
+        sample_rate=config.sample_rate,
+        channels=config.channels,
+        device=config.input_device,
+        open_timeout=d.mic_open_timeout_seconds,
+        max_seconds=d.max_seconds + 5,  # the hotkey script stops at the limit; this is the backstop
+        warm=d.warm_mic,
+        preroll_ms=d.preroll_ms,
+    )
+    learner = None
+    if config.dictionary.auto_learn and not dry_run:
+        from .autolearn import Learner, UIAReader
+
+        learner = Learner(dictionary, UIAReader, config.dictionary.learn_seconds, log_text=config.debug_log_transcripts)
+    assets = write_assets(config.data_dir / "assets")
+    return DictationService(
+        config, engine, mic, clean=clean, dictionary=dictionary, snippets=snippets, learner=learner,
+        dry_run=dry_run, assets_dir=assets,
+    )
+
+
+def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
+    from .server import make_server
+
+    service = build_service(config, dry_run)
+    try:
+        service.open()
+        server = make_server(service, port or config.service_port)
+    except Exception:
+        service.close()
+        raise
+    logger.info(
+        "Dictation service ready on http://127.0.0.1:%s model=%s prep=%s warm_mic=%s ai_cleanup=%s auto_learn=%s%s",
+        server.server_port, service.engine.model, config.dictation.audio_prep, config.dictation.warm_mic,
+        config.cleanup_enabled, service.learner is not None, " (dry run: no OpenAI calls)" if dry_run else "",
+    )
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        logger.info("Stopping dictation service")
+    finally:
+        server.server_close()
+        service.close()
+    return 0
+
+
+def run_latency(config: AppConfig, last: int | None) -> int:
+    from .latency import format_report, load_records, summarize
+
+    path = config.logs_dir / "dictation-latency.jsonl"
+    records = load_records(path)
+    if last:
+        records = records[-last:]
+    sys.stdout.write(format_report(summarize(records), path) + "\n")
+    return 0
+
+
+def run_dictionary(config: AppConfig) -> int:
+    store = _dictionary(config)
+    if store.ensure_file():
+        sys.stdout.write("Created a starter dictionary.\n")
+    current = store.current()
+    keywords = store.keywords()
+    sys.stdout.write(
+        f"Dictionary: {store.path}\n"
+        f"Terms: {len(current.terms)}   Fixes: {len(current.replace)}\n"
+        f"Sent to GPT-Transcribe with each dictation: {len(keywords)} of at most {store.max_keywords}"
+        + (f" (includes {len(config.keywords)} from transcription.keywords in the config)" if config.keywords else "")
+        + "\n"
+    )
+    if store.error:
+        sys.stdout.write(f"Error: {store.error}\nDictation keeps using the last good copy until this is fixed.\n")
+        return 1
+    sys.stdout.write("No errors. Edit it in any text editor; the next dictation picks up the change.\n")
+    return 0
+
+
+def run_snippets(config: AppConfig) -> int:
+    store = _snippets(config)
+    if store.ensure_file():
+        sys.stdout.write("Created a starter snippets file.\n")
+    current = store.current()
+    sys.stdout.write(f"Snippets: {store.path}\nCount: {len(current)}\n")
+    if current:
+        sys.stdout.write("Say one of these as the whole dictation:\n")
+        for spoken in sorted(current):
+            sys.stdout.write(f'  "insert {spoken}"\n')
+    if store.error:
+        sys.stdout.write(f"Error: {store.error}\nDictation pastes the words instead of a snippet until this is fixed.\n")
+        return 1
+    sys.stdout.write("No errors. Edit it in any text editor; the next dictation picks up the change.\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -200,6 +343,14 @@ def main(argv: list[str] | None = None) -> None:
             code = run_pipeline(config, Path(args.audio_path), None, args.profile, args.prep, args.context)
         elif args.command == "eval":
             code = run_eval_command(config, Path(args.clips), args.prep, Path(args.results), args.fresh)
+        elif args.command == "serve":
+            code = run_serve(config, args.port, args.dry_run)
+        elif args.command == "latency":
+            code = run_latency(config, args.last)
+        elif args.command == "dictionary":
+            code = run_dictionary(config)
+        elif args.command == "snippets":
+            code = run_snippets(config)
         else:
             code = 1
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
