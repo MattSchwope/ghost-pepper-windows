@@ -31,7 +31,8 @@ from .engines import TimedText, clean_keywords
 from .latency import append_record
 from .markdown_store import append_daily_dictation
 from .mic import MicCapture, MicError, MicTimeout
-from .snippets import Snippet, SnippetStore, match_snippet, spoken_name
+from .recent import RecentDictation, RecentDictations, from_daily_log, snippet_label
+from .snippets import Snippet, SnippetStore, match_snippet, snippet_named, spoken_name
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ class DictationService:
         self._cancelled: set[int] = set()
         self._pending: OrderedDict[int, dict[str, Any]] = OrderedDict()
         self._texts: OrderedDict[int, str] = OrderedDict()  # pasted text for auto-learn; never logged
+        self.recent = RecentDictations()  # the recent-dictations window and paste_last; memory only, never logged
         self._watchdog: threading.Timer | None = None
         self._last_api = 0.0
         self._last_refresh = time.monotonic()
@@ -131,8 +133,25 @@ class DictationService:
         """Open the mic now when warm_mic is on, so the first dictation has pre-roll."""
         with self._mic_lock:
             self.mic.open_warm()
+        self.load_recent()
         if self.learner is not None:
             self.learner.start()
+
+    def load_recent(self) -> None:
+        """Refill recent dictations from today's daily log, so a restart does not empty the window."""
+        if not self.config.dictation.daily_log:
+            return
+        try:
+            items = from_daily_log(self.config.notes_dir, self.now().date(), self._snippet_text)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("Could not read today's daily log for recent dictations: %s", exc)
+            return
+        self.recent.extend(items)
+        logger.info("Recent dictations: %s refilled from today's daily log", len(items))
+
+    def _snippet_text(self, name: str) -> str | None:
+        snippet = snippet_named(name, self.snippets.current()) if self.snippets is not None else None
+        return snippet.text if snippet is not None else None
 
     def close(self) -> None:
         self._cancel_watchdog()
@@ -164,6 +183,8 @@ class DictationService:
             "dictate_key": h.dictate,
             "cancel_key": h.cancel,
             "add_word_key": h.add_word,
+            "recent_key": h.recent,
+            "paste_last_key": h.paste_last,
             "dictionary_path": self.dictionary.path.as_posix() if self.dictionary else "",
             "snippets_path": self.snippets.path.as_posix() if self.snippets else "",
             "auto_learn": self.learner is not None and self.learner.available,
@@ -296,6 +317,7 @@ class DictationService:
             if dictation_id in self._cancelled:
                 self._cancelled.discard(dictation_id)
                 self._pending.pop(dictation_id, None)
+                self.recent.remove(dictation_id)
                 result = StopResult("cancelled", dictation_id)
             self._state = "idle"
         return result
@@ -408,8 +430,10 @@ class DictationService:
                 self._texts[dictation_id] = text
                 while len(self._texts) > PENDING_LIMIT:
                     self._texts.popitem(last=False)
-        when = datetime.fromisoformat(record["ts"])
-        logged = f"[snippet: {snippet.name}]" if snippet is not None else text
+            when = datetime.fromisoformat(record["ts"])
+            label = snippet_label(snippet.name) if snippet is not None else ""
+            self.recent.add(RecentDictation(when, text, label=label, dictation_id=dictation_id))
+        logged = label or text
         self._post.submit(self._after_success, dictation_id, raw, rate, logged, raw_text, clip.raw_seconds, when)
         return StopResult("ok", dictation_id, text=text, note=note)
 
@@ -430,8 +454,12 @@ class DictationService:
         return StopResult("skipped", dictation_id, message=SKIP_MESSAGES[reason])
 
     # -- after the paste --
-    def pasted(self, dictation_id: int, release_to_paste_ms: int, paste_ms: int, clipboard_restored: bool | None) -> bool:
-        """Record what the hotkey script measured: key release to text pasted."""
+    def pasted(
+        self, dictation_id: int, release_to_paste_ms: int, paste_ms: int, clipboard_restored: bool | None, app: str = ""
+    ) -> bool:
+        """Record what the hotkey script measured: key release to text pasted, and the program it went to."""
+        if app:
+            self.recent.set_app(dictation_id, app)  # shown in the recent-dictations window; never logged
         with self._lock:
             record = self._pending.pop(dictation_id, None)
         if record is None:

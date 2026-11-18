@@ -248,9 +248,13 @@ If the cursor was in the wrong window, the dictation pastes somewhere useless or
 
 **Done when**
 - [ ] The window opens within 0.3 seconds of the hotkey and lists the last 10 dictations, newest first.
-- [ ] The copy button puts the exact pasted text on the clipboard, line breaks included (test).
+- [x] The copy button puts the exact pasted text on the clipboard, line breaks included (test). `test_copy_button_gets_the_exact_pasted_text_through_the_real_server` runs the script's own client and parser against a real service and checks the copied text byte for byte, line breaks as CR LF.
 - [ ] A dictation that pasted into a window with no text field still shows up and can be copied.
 - [ ] `paste_last` pastes the latest dictation and restores the clipboard.
+
+How to check: the copy test runs with `pytest`. The window open time, a dictation into a window with no text field, and `paste_last` need the real app; see the Phase 2c checklist in the PR.
+
+Built notes: the service answers `POST /recent` (it needs the client header, so a web page cannot read it) with one tab-separated line per dictation and `\` escapes, which the script parses in `app/scripts/lib/recent_logic.ahk`. The program name comes from the script's `/pasted` report and is never logged.
 
 ## Phase 3: Voice-edit selection
 

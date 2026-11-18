@@ -218,3 +218,19 @@ def test_snippet_comes_back_well_inside_the_paste_target(running, tmp_path):
         assert response.getheader("X-Dictation-Status") == "ok"
         assert data.decode("utf-8") == long_text
     assert sorted(elapsed)[2] < 0.3
+
+
+def test_recent_over_http_needs_the_client_header_and_lists_the_paste(running):
+    server, service = running()
+    request(server, "POST", "/start")
+    _, _ = request(server, "POST", "/stop")
+    response, data = request(server, "POST", "/pasted", "id=1&release_to_paste_ms=900&paste_ms=20&app=OUTLOOK.EXE")
+    assert response.status == 200 and json.loads(data)["ok"] is True
+    response, data = request(server, "POST", "/recent")
+    assert response.status == 200 and response.getheader("Content-Type").startswith("text/plain")
+    time_, app, label, text = data.decode("utf-8").rstrip("\n").split("\t")
+    assert (app, label, text) == ("OUTLOOK", "", service.recent.newest_first()[0].text)
+    response, _ = request(server, "POST", "/recent", headers={"X-GPW-Client": ""})
+    assert response.status == 403
+    response, _ = request(server, "GET", "/recent")
+    assert response.status == 404  # never readable with a plain GET
