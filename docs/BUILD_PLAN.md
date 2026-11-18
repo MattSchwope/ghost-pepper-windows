@@ -19,7 +19,7 @@ Both paths share one engine: fuzzy-audio cleanup, OpenAI GPT-Transcribe and a pe
 | Text cleanup, voice edits, summaries | OpenAI text models. Ollama is removed. |
 | Hotkey | Both modes: hold to talk, double-tap for hands-free. |
 | Dictation cleanup | Light: punctuation, capitalization, fillers and false starts removed. Word choice is never changed. |
-| Extras | Personal dictionary, snippets, voice-edit of selected text. |
+| Extras | Personal dictionary, on-screen name spelling, snippets, voice-edit of selected text. |
 | Fuzzy audio | Required. Sources: noisy dictation, recorded talks, phone calls. |
 | Long recordings | Watched folder. The subfolder picks the profile. Summary on top, full transcript below. |
 | Output | Plain Markdown, Obsidian-friendly. |
@@ -34,6 +34,7 @@ Decision records: `docs/decisions/ADR-002-openai-default-engine.md` and `docs/de
 | 0 | Foundation: port `transcribe`, swap Ollama for OpenAI, eval harness | Everything else builds on it |
 | 1 | Dictation core | The daily-driver Wispr replacement |
 | 2 | Dictionary, light cleanup, snippets | Accuracy on names plus speed |
+| 2b | On-screen name spelling | Names with several spellings (Sean, Shawn; Kelly, Kelli) that one dictionary entry can't settle |
 | 3 | Voice-edit selection | Highest-value extra after accuracy |
 | 4 | Long recordings | Secondary use case; most code already exists in `transcribe` |
 | 5 | Noise lab | Tune fuzzy-audio cleanup with real data |
@@ -54,8 +55,9 @@ AutoHotkey v2 (front end)
 Python service (always running, warm)
   ├─ mic capture (sounddevice)
   ├─ clip prep: trim silence, highpass, level, optional denoise
-  ├─ engine: gpt-transcribe + dictionary keywords
-  ├─ post: dictionary fixes → snippet match → light cleanup
+  ├─ screen names: focused window text → names, read while recording (UI Automation)
+  ├─ engine: gpt-transcribe + screen names + dictionary keywords
+  ├─ post: dictionary fixes → name spelling (screen, then preferred) → snippet match → light cleanup
   ├─ voice-edit: selection + spoken instruction → text model
   ├─ watcher thread: inbox/<profile>/ → long-recording pipeline
   └─ Markdown writer + stage timing logs
@@ -101,6 +103,7 @@ dictation:
   audio_prep: light            # off | light | strong
   daily_log: true              # append every dictation to notes/dictation/YYYY-MM-DD.md
   hands_free_max_minutes: 10
+  screen_names: true           # Phase 2b: spell names the way the focused window shows them
 
 files:
   dictionary: C:/GhostPepperWindows/dictionary.yaml
@@ -184,6 +187,41 @@ replace:                                         # applied after transcription
 How to check: `gpw dictionary` shows the file and what is sent. `test_light_cleanup_changes_no_content_words` is the word-diff test, and `words_kept()` applies the same check to the text-model pass at run time. Dictionary, light cleanup, add-word and auto-learn landed first (October 28, 2026) so they could be tried alongside the Phase 1 checks; snippets followed on November 4, 2026.
 
 For snippets, `gpw latency` reports `transcript_to_paste` against the 0.3-second target, plus release-to-paste for the same dictations. See open question 12 for why those differ. `test_snippet_comes_back_well_inside_the_paste_target` covers the service side. The box stays open until real pastes are in the log.
+
+## Phase 2b: On-screen name spelling
+
+Many names have several spellings: Sean, Shawn, Shaun; Kelly, Kelli, Kellie; Catherine, Katherine, Kathryn. A `replace:` entry forces one spelling everywhere, so `"kelly": "Kelli"` misspells every other Kelly. The right spelling is usually already on screen: the To line of an email, the thread, a chat header, a LinkedIn profile.
+
+**Per dictation**
+1. On key down, a worker thread reads the text of the focused window through UI Automation, while the mic records, so it adds no wait after release. It reuses auto-learn's reader, widened from the focused field to the window.
+2. Pick out likely names: capitalized words and two-word runs, minus sentence starts and common words. Only these leave the reader. The screen text stays in memory and is dropped after the dictation.
+3. Send the screen names first in that request's GPT-Transcribe keywords, then dictionary terms, within `dictionary.max_keywords`.
+4. After transcription, match each capitalized word in the transcript to the screen names by sound (a phonetic key such as Double Metaphone) and spelling similarity. If exactly one screen name matches, use its spelling. If two different spellings on screen match, or none does, leave the word alone.
+5. Names not on screen fall back to a preferred spelling in the dictionary (below), and otherwise stay as transcribed.
+
+**Dictionary changes**
+
+```yaml
+prefer:            # default spelling when the screen gives no clue; the screen wins
+  "kelly": "Kelli"
+  "catherine": "Katherine"
+```
+
+- Name-only `replace:` entries move to `prefer:`. `replace:` keeps acronyms and real mishearings (`"cavaliro": "Kavaliro"`), which always apply.
+- Auto-learn saves a corrected name to `prefer:` instead of `replace:`, and skips the save when the screen already showed the spelling you typed.
+- `gpw dictionary` lists `prefer:` and warns about `replace:` entries that look like name variants, or that add words instead of fixing one (`"clearance": "clearance TS/SCI"`).
+
+**Privacy and limits**
+- `dictation.screen_names` turns it off, and `dictation.screen_names_skip` lists apps never read (password managers, banking). Password fields are skipped, as in auto-learn.
+- Never log screen text or names unless `privacy.debug_log_transcripts` is on. Log per dictation which app was read, how many names were found, and whether a name was changed.
+- Apps that expose no text (remote desktop, images, scanned PDFs) get no screen names. OCR stays a later idea.
+- Reading Chrome and Electron apps (Teams, Slack, new Outlook) turns on their accessibility tree. See open question 10.
+
+**Done when**
+- [ ] With one spelling of a name on screen, a dictation that says the name pastes that spelling in at least 95% of tries, in Outlook, Chrome (Gmail and LinkedIn), Teams and Slack.
+- [ ] With two spellings of the same name on screen, the transcribed word is left alone (test).
+- [ ] Median release-to-paste with `screen_names` on is within 0.1 seconds of off, over 50 dictations.
+- [ ] Screen text is never written to disk or logs, and only the picked-out names are sent to OpenAI (test).
 
 ## Phase 3: Voice-edit selection
 
@@ -309,7 +347,7 @@ Status as of October 27, 2026: macOS only (Apple Silicon), fully on-device, no W
 | Post-paste learning of corrections | Phase 2, experimental |
 | Transcription Lab for comparing models | Same role as `gpw eval` (Phases 0 and 5) |
 | Streaming ASR models for lower latency (July) | Validates Phase 1b |
-| Screen/OCR context to help spelling | Later idea. Privacy cost, so opt-in only. |
+| Screen/OCR context to help spelling | Phase 2b, from on-screen text via UI Automation, with an off switch. OCR stays a later idea. |
 | Meeting detection, Granola import, meeting Q&A, "2nd Brain" wiki over notes | Later ideas, not scheduled |
 
 Upstream is Swift, so nothing ports as code. Borrow designs, not files.
@@ -317,7 +355,8 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 ## Later ideas (not scheduled)
 
 - Ask questions across the Markdown notes archive.
-- Screen-context spelling hints, opt-in.
+- OCR for name spelling where UI Automation finds no text (remote desktop, images, scanned PDFs). Opt-in.
+- A contacts list (Outlook or an ATS export) as another source of known name spellings.
 - System-audio capture for Teams and Zoom calls.
 
 ## Open questions (decide during the build)
@@ -335,3 +374,5 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 11. Auto-learn only learns fixes whose new form has a capital letter or digit (names, acronyms), and never a changed number (100 -> 200). A fix like mark -> Marc would turn every later "mark" into "Marc". Remove bad ones from `replace:` in the dictionary.
 12. "Snippets paste in under 0.3 seconds" can only hold from the transcript to the paste. The phrase has to reach GPT-Transcribe first, and short clips took a median of about 1.5 seconds there in the first live logs. Measuring from key release would need a way around speech, such as a hotkey per snippet, or a faster transcript from Phase 1b or Phase 6.
 13. Snippets fire only when "insert <name>" is the whole dictation. "Thanks for your time. Insert signature." stays as words. Firing on a sentence of its own inside a longer dictation would be handy for email sign-offs, at some risk of accidental fires.
+14. Phase 2b reads only the window you dictate into. Often the name was on a different screen a moment ago, such as a LinkedIn profile before switching to Outlook. A short memory of names seen in recent windows (a few minutes, in memory only) would catch that, at the cost of more screen reading.
+15. Phase 2b changes only capitalized words, so "mark the date" never becomes "Marc". Names GPT-Transcribe returns in lowercase are not fixed. Check the logs for how often that happens.
