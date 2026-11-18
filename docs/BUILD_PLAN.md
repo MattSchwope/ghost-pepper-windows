@@ -35,6 +35,7 @@ Decision records: `docs/decisions/ADR-002-openai-default-engine.md` and `docs/de
 | 1 | Dictation core | The daily-driver Wispr replacement |
 | 2 | Dictionary, light cleanup, snippets | Accuracy on names plus speed |
 | 2b | On-screen name spelling | Names with several spellings (Sean, Shawn; Kelly, Kelli) that one dictionary entry can't settle |
+| 2c | Recent dictations | Rescue a dictation that pasted into the wrong window. Small, so it can ship before 2b |
 | 3 | Voice-edit selection | Highest-value extra after accuracy |
 | 4 | Long recordings | Secondary use case; most code already exists in `transcribe` |
 | 5 | Noise lab | Tune fuzzy-audio cleanup with real data |
@@ -47,8 +48,9 @@ Phase 1b (live streaming) runs only if Phase 1 misses its latency target.
 
 ```text
 AutoHotkey v2 (front end)
-  ├─ hotkeys: hold, double-tap, voice-edit, cancel
+  ├─ hotkeys: hold, double-tap, voice-edit, cancel, recent, paste last
   ├─ copies selection for voice-edit
+  ├─ recent dictations window with copy buttons
   └─ pastes result, then restores the clipboard
         │  HTTP on 127.0.0.1
         ▼
@@ -97,6 +99,8 @@ hotkeys:                       # proposed defaults, all configurable
   hands_free: RCtrl double-tap # tap once to stop
   voice_edit_hold: RCtrl+RShift
   cancel: Esc
+  recent: Ctrl+Alt+H           # Phase 2c: show the last 10 dictations
+  paste_last: Ctrl+Alt+L       # Phase 2c: paste the most recent dictation again
 
 dictation:
   cleanup: light               # verbatim | light
@@ -222,6 +226,31 @@ prefer:            # default spelling when the screen gives no clue; the screen 
 - [ ] With two spellings of the same name on screen, the transcribed word is left alone (test).
 - [ ] Median release-to-paste with `screen_names` on is within 0.1 seconds of off, over 50 dictations.
 - [ ] Screen text is never written to disk or logs, and only the picked-out names are sent to OpenAI (test).
+
+## Phase 2c: Recent dictations
+
+If the cursor was in the wrong window, the dictation pastes somewhere useless or nowhere. Getting it back today means opening the daily log file. Instead, keep the last 10 one keypress away, each with a copy button.
+
+**Recent dictations window**
+- Opens from the `recent` hotkey (Ctrl+Alt+H proposed), a left-click on the tray dot, or "Recent dictations" at the top of the tray menu.
+- A small window near the tray, newest first. Each row shows the time, the app it was pasted into (the program name, not the window title), and the first two lines of text. Hovering shows the whole text.
+- Each row has a copy button with the usual two-rectangle copy icon. Clicking it puts the full text on the clipboard, line breaks included, and the row shows "Copied" for a moment. You then paste it wherever you want with Ctrl+V.
+- Keyboard: 1 through 9 and 0 copy that row and close the window. Esc or clicking elsewhere closes it.
+- Snippets show as `[snippet: <name>]` and copy the snippet text. Cancelled and silent clips have no text and are not listed.
+
+**Paste last again**
+- The `paste_last` hotkey (Ctrl+Alt+L proposed) pastes the most recent dictation into the current window, with the same clipboard save and restore as a normal paste. This covers the usual case, a wrong window a moment ago, with no window at all.
+
+**Where the text lives**
+- The service keeps the last 10 in memory and serves them on `/recent`, bound to 127.0.0.1 like the other endpoints.
+- After a restart, the list is refilled from today's daily log when `dictation.daily_log` is on, and starts empty when it's off. Nothing new is written to disk.
+- Built in AutoHotkey's own GUI, so there is no new program or dependency.
+
+**Done when**
+- [ ] The window opens within 0.3 seconds of the hotkey and lists the last 10 dictations, newest first.
+- [ ] The copy button puts the exact pasted text on the clipboard, line breaks included (test).
+- [ ] A dictation that pasted into a window with no text field still shows up and can be copied.
+- [ ] `paste_last` pastes the latest dictation and restores the clipboard.
 
 ## Phase 3: Voice-edit selection
 
