@@ -251,10 +251,15 @@ def build_service(config: AppConfig, dry_run: bool):
         from .autolearn import Learner, UIAReader
 
         learner = Learner(dictionary, UIAReader, config.dictionary.learn_seconds, log_text=config.debug_log_transcripts)
+    screen = None
+    if d.screen_names and not dry_run:
+        from .screen import ScreenReader, UIAWindowReader
+
+        screen = ScreenReader(UIAWindowReader, d.screen_names_skip)
     assets = write_assets(config.data_dir / "assets")
     return DictationService(
         config, engine, mic, clean=clean, dictionary=dictionary, snippets=snippets, learner=learner,
-        dry_run=dry_run, assets_dir=assets,
+        screen=screen, dry_run=dry_run, assets_dir=assets,
     )
 
 
@@ -269,9 +274,11 @@ def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
         service.close()
         raise
     logger.info(
-        "Dictation service ready on http://127.0.0.1:%s model=%s prep=%s warm_mic=%s ai_cleanup=%s auto_learn=%s%s",
+        "Dictation service ready on http://127.0.0.1:%s model=%s prep=%s warm_mic=%s ai_cleanup=%s auto_learn=%s "
+        "screen_names=%s%s",
         server.server_port, service.engine.model, config.dictation.audio_prep, config.dictation.warm_mic,
-        config.cleanup_enabled, service.learner is not None, " (dry run: no OpenAI calls)" if dry_run else "",
+        config.cleanup_enabled, service.learner is not None, service.screen is not None,
+        " (dry run: no OpenAI calls)" if dry_run else "",
     )
     try:
         server.serve_forever(poll_interval=0.5)
@@ -298,19 +305,35 @@ def run_dictionary(config: AppConfig) -> int:
     store = _dictionary(config)
     if store.ensure_file():
         sys.stdout.write("Created a starter dictionary.\n")
+    from .dictionary import dictionary_warnings
+
     current = store.current()
     keywords = store.keywords()
     sys.stdout.write(
         f"Dictionary: {store.path}\n"
-        f"Terms: {len(current.terms)}   Fixes: {len(current.replace)}\n"
+        f"Terms: {len(current.terms)}   Fixes: {len(current.replace)}   Preferred spellings: {len(current.prefer)}\n"
         f"Sent to GPT-Transcribe with each dictation: {len(keywords)} of at most {store.max_keywords}"
         + (f" (includes {len(config.keywords)} from transcription.keywords in the config)" if config.keywords else "")
         + "\n"
     )
+    if config.dictation.screen_names:
+        sys.stdout.write(
+            "Names read from the window you dictate into go first, within the same limit (dictation.screen_names).\n"
+        )
+    if current.prefer:
+        sys.stdout.write("Preferred spellings (used when the window shows no spelling of that name):\n")
+        for heard, wanted in current.prefer.items():
+            sys.stdout.write(f"  {heard} -> {wanted}\n")
     if store.error:
         sys.stdout.write(f"Error: {store.error}\nDictation keeps using the last good copy until this is fixed.\n")
         return 1
-    sys.stdout.write("No errors. Edit it in any text editor; the next dictation picks up the change.\n")
+    warnings = dictionary_warnings(current)
+    for warning in warnings:
+        sys.stdout.write(f"Warning: {warning}\n")
+    sys.stdout.write(
+        ("No errors. " if not warnings else "Warnings change nothing by themselves. ")
+        + "Edit it in any text editor; the next dictation picks up the change.\n"
+    )
     return 0
 
 

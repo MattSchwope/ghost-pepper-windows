@@ -3,7 +3,9 @@
 After a paste, one worker thread reads the focused text field through Windows UI Automation
 for dictionary.learn_seconds. If you change one or two words of the pasted text into a name
 or acronym (cavaliro -> Kavaliro, ts sci -> TS/SCI), that pair is saved to dictionary.yaml
-replace:. Plain lowercase edits (their -> there) are never learned: they are grammar or word
+replace:. A capitalized name respelled as a sound-alike (Kelly -> Kelli) goes to prefer:
+instead, and nothing is saved when the screen already showed the new spelling (Phase 2b).
+Plain lowercase edits (their -> there) are never learned: they are grammar or word
 choice, not spelling. The field text stays in memory; it is never logged or sent anywhere.
 Password fields are skipped.
 """
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .dictionary import MAX_TERM_CHARS, DictionaryStore
+from .names import is_name_word, sounds_alike
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +129,17 @@ def find_corrections(pasted: str, before: str, after: str, max_changes: int = 2)
         right = " ".join(_core(t) for t in new).strip()
         sentence_start = i1 == 0 or b[i1 - 1][-1:] in ".?!"
         if learnable(wrong, right, sentence_start):
-            pairs.append((wrong.casefold(), right))
+            pairs.append((wrong, right))  # as pasted, so a capitalized name can go to prefer:
     return pairs
+
+
+def is_name_fix(wrong: str, right: str) -> bool:
+    """Kelly -> Kelli: one capitalized name respelled as another that sounds the same. Saved to prefer:.
+
+    The pasted word must already be capitalized: prefer: only changes capitalized words, so a
+    lowercase mishearing (cavaliro -> Kavaliro) still goes to replace:, which always applies.
+    """
+    return " " not in wrong and is_name_word(wrong) and is_name_word(right) and sounds_alike(wrong, right)
 
 
 class Field(Protocol):
@@ -178,15 +190,19 @@ class Learner:
             self._thread.join(timeout=3)
             self._thread = None
 
-    def watch(self, dictation_id: int, pasted: str) -> bool:
-        """Start watching the focused field for corrections to `pasted`. Ends the previous watch."""
+    def watch(self, dictation_id: int, pasted: str, seen: frozenset[str] | set[str] = frozenset()) -> bool:
+        """Start watching the focused field for corrections to `pasted`. Ends the previous watch.
+
+        `seen` holds the name spellings the screen showed for this dictation. A fix to one of them
+        is not saved: the screen will show it again next time.
+        """
         if not self.available or not pasted.strip():
             return False
         with self._lock:
             self._queued += 1
             self._idle.clear()
         self._interrupt.set()
-        self._jobs.put((dictation_id, pasted))
+        self._jobs.put((dictation_id, pasted, frozenset(seen)))
         self.start()
         return True
 
@@ -214,10 +230,10 @@ class Learner:
             if job is None:
                 return
             self._interrupt.clear()
-            dictation_id, pasted = job
+            dictation_id, pasted, seen = job
             if reader is not None:
                 try:
-                    self._watch(reader, dictation_id, pasted)
+                    self._watch(reader, dictation_id, pasted, seen)
                 except Exception as exc:
                     logger.error("Auto-learn id=%s failed (%s)", dictation_id, type(exc).__name__)
             with self._lock:
@@ -225,7 +241,7 @@ class Learner:
                 if self._queued == 0:
                     self._idle.set()
 
-    def _watch(self, reader: FieldReader, dictation_id: int, pasted: str) -> None:
+    def _watch(self, reader: FieldReader, dictation_id: int, pasted: str, seen: frozenset[str] = frozenset()) -> None:
         field = reader.focused()
         if field is None:
             logger.info("Auto-learn id=%s: no readable text field in focus", dictation_id)
@@ -246,15 +262,24 @@ class Learner:
                 break
         pairs = find_corrections(pasted, before, last) if before is not None and last is not None else []
         added = []
+        on_screen = preferred = 0
         for wrong, right in pairs:
+            if right in seen:
+                on_screen += 1  # the screen showed this spelling, and will again
+                continue
             try:
-                if self.store.add_replacement(wrong, right):
-                    added.append((wrong, right))
+                if is_name_fix(wrong, right):
+                    saved = self.store.add_preferred(wrong, right)
+                    preferred += saved
+                else:
+                    saved = self.store.add_replacement(wrong, right)
+                if saved:
+                    added.append((wrong.casefold(), right))
             except ValueError as exc:
                 logger.error("Auto-learn id=%s could not save a fix: %s", dictation_id, exc)
         logger.info(
-            "Auto-learn id=%s app=%s paste_found=%s learned=%s",
-            dictation_id, field.app, before is not None, len(added),
+            "Auto-learn id=%s app=%s paste_found=%s learned=%s preferred=%s skipped_on_screen=%s",
+            dictation_id, field.app, before is not None, len(added), preferred, on_screen,
         )
         if added and self.log_text:
             logger.info("Auto-learn id=%s learned: %s", dictation_id, "; ".join(f"{w} -> {r}" for w, r in added))

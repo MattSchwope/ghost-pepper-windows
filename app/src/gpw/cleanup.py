@@ -1,12 +1,12 @@
 """Light cleanup for dictation. Word choice is never changed.
 
 Rules (local, well under a millisecond), in this order:
-  1. dictionary fixes (dictionary.yaml replace:)
+  1. dictionary fixes (dictionary.yaml replace:), then name spelling from the screen and prefer:
   2. filler removal: um, uh, erm
   3. optional text-model pass (cleanup.ai_pass) for punctuation and false starts.
      words_kept() throws its answer away if it changed, added or reordered a word.
   4. spoken commands: "new line", "new paragraph"
-  5. after a text-model pass, dictionary spellings again, in case it re-cased a name
+  5. after a text-model pass, dictionary and name spellings again, in case it re-cased a name
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .dictionary import apply_replacements
+from .names import NameFix
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +164,11 @@ def clean_dictation(
     fillers: bool = True,
     commands: bool = True,
     ai: Callable[[str], str] | None = None,
+    names: NameFix | None = None,
 ) -> CleanupResult:
     text = apply_replacements(raw, replace)
+    if names is not None:
+        text = names(text)  # name spelling from the screen, then prefer: (names.NameFix)
     if fillers:
         text = remove_fillers(text)
     ai_seconds, ai_status = None, "off"
@@ -185,5 +189,6 @@ def clean_dictation(
     if commands:
         text = apply_spoken_commands(text)
     if ai_status == "used":
-        text = keep_term_case(text, terms or [], replace)
+        chosen = [new for _, new in names.changes] if names is not None else []
+        text = keep_term_case(text, [*(terms or []), *chosen], replace)
     return CleanupResult(text=text, ai_seconds=ai_seconds, ai_status=ai_status)

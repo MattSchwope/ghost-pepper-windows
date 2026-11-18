@@ -58,8 +58,8 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 | `gpw eval --prep off,light,strong` | Runs every clip in `eval/clips/` at each prep level and prints a WER table. Hypotheses are cached in `eval/results/`; `--fresh` redoes them |
 | `gpw record-once --duration 8` | Beeps, records for that many seconds, beeps again, then transcribes and copies the text. Uses the Windows default mic unless `recording.input_device` names another. Kept for quick mic checks; daily dictation uses hold-to-talk below |
 | `gpw serve` | The always-running dictation service the hotkey script talks to, on 127.0.0.1 only. It keeps the last 10 dictations in memory for the recent-dictations window. `--dry-run` pastes a fixed sentence instead of calling OpenAI. Normally started for you by the hotkey script |
-| `gpw latency` | Release-to-paste report from the dictation timing log: median, 90th percentile, and where the time goes. `--last 50` for the most recent 50 |
-| `gpw dictionary` | Shows where the personal dictionary is, how many terms and fixes it has, how many terms go out with each dictation, and any error in the file. Creates a starter file if there is none |
+| `gpw latency` | Release-to-paste report from the dictation timing log: median, 90th percentile, and where the time goes, plus release-to-paste with screen names on and off. `--last 50` for the most recent 50 |
+| `gpw dictionary` | Shows where the personal dictionary is, how many terms and fixes it has, the preferred name spellings, how many terms go out with each dictation, any error in the file, and warnings about `replace:` entries that belong in `prefer:` or add words. Creates a starter file if there is none |
 | `gpw snippets` | Shows where the snippets file is, the phrases you can say, and any error in the file. Creates a starter file if there is none |
 
 The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
@@ -111,8 +111,21 @@ For a dictation that pasted into the wrong window, or nowhere.
 `C:\GhostPepperWindows\dictionary.yaml` is created with examples the first time the service starts. Open it from the tray menu. Changes apply to the next dictation, with no restart.
 
 - `terms:` names and acronyms sent to GPT-Transcribe as spelling hints with every dictation, top of the list first (at most `dictionary.max_keywords`).
-- `replace:` fixes applied after transcription, as `"heard": "Wanted"`. They ignore case and only match whole words.
-- Auto-learn (experimental, `dictionary.auto_learn`): for 15 seconds after a paste, it watches the text field. If you fix a name or acronym in the pasted text (cavaliro to Kavaliro), it saves that fix and shows a tooltip. Plain lowercase edits are never learned. It reads the field through Windows UI Automation; nothing leaves the PC.
+- `replace:` fixes applied after transcription, as `"heard": "Wanted"`. They ignore case, only match whole words and always apply. Use them for acronyms and real mishearings (`"cavaliro": "Kavaliro"`).
+- `prefer:` your usual spelling of a name that has several, as `"kelly": "Kelli"`. It only changes capitalized words, so "kelly green" stays, and only when the window you dictate into shows no spelling of that name (see below). A `replace:` entry for a name would misspell every Kelly; `gpw dictionary` warns about those, and about fixes that add words (`"clearance": "clearance TS/SCI"`). Move them yourself; nothing is changed for you.
+- Auto-learn (experimental, `dictionary.auto_learn`): for 15 seconds after a paste, it watches the text field. If you fix a name or acronym in the pasted text (cavaliro to Kavaliro), it saves that fix and shows a tooltip. A capitalized name respelled as one that sounds the same (Kelly to Kelli) is saved to `prefer:`, and nothing is saved when the window already showed the spelling you typed. Plain lowercase edits are never learned. It reads the field through Windows UI Automation; nothing leaves the PC.
+
+### Names spelled the way the screen shows them
+
+Sean or Shawn, Kelly or Kelli, Catherine or Kathryn: the right spelling is usually on screen already, in the To line, the thread, a chat header or a LinkedIn profile. With `dictation.screen_names` on (the default):
+
+- When you press the dictate key, the service reads the text of the window in front through Windows UI Automation while the mic records, and picks out likely names (capitalized words and full names, minus common words). Only those names leave the reader: they go to GPT-Transcribe first among the spelling hints, within `dictionary.max_keywords`. The window text stays in memory, is dropped right away and is never saved, logged or sent.
+- After transcription, each capitalized word that sounds like exactly one name on screen takes that spelling: "Sean" becomes "Shawn" when the email is from Shawn. If the screen shows two spellings (Kelly and Kelli), the word is left as heard. A name not on screen falls back to `prefer:`, otherwise it stays as heard.
+- Only capitalized words change, and never a common word at the start of a sentence, so "Mark the date" stays even when Marc is on screen. Names GPT-Transcribe returns in lowercase are not fixed.
+- Known first names match only their own variants (Sean and Shawn, never Sean and Shane), from the list in `app/src/gpw/name_data.py`. Other names (most surnames) match by sound and spelling: Smith and Smyth.
+- It costs no wait after release: if the window is slow to read, the dictation goes on without names after at most 0.08 seconds. `gpw latency` compares release-to-paste with it on and off.
+- `dictation.screen_names_skip` lists what is never read: password managers by program name, and words in a window title (add "Chase" or your bank's name for banking sites). Password fields are always skipped. Apps that expose no text (remote desktop, images, scanned PDFs) give no names.
+- The log shows, per dictation, which program was read, how many names were found and how many words were respelled, never the names themselves unless `privacy.debug_log_transcripts` is on. Reading Chrome and Electron apps (Teams, Slack, new Outlook) turns on their accessibility tree, which can cost some CPU. Set `screen_names: false` to turn it all off.
 
 Cleanup never changes word choice:
 

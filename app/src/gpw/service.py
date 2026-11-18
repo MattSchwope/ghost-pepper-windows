@@ -28,10 +28,12 @@ from .clip_prep import encode, ffmpeg_filter, prepare_clip
 from .config import AppConfig
 from .dictionary import DictionaryStore, apply_replacements
 from .engines import TimedText, clean_keywords
-from .latency import append_record
+from .latency import SCREEN_WAIT_CAP, append_record
 from .markdown_store import append_daily_dictation
 from .mic import MicCapture, MicError, MicTimeout
+from .names import NameFix, merge_keywords
 from .recent import RecentDictation, RecentDictations, from_daily_log, snippet_label
+from .screen import ScreenReader, ScreenResult
 from .snippets import Snippet, SnippetStore, match_snippet, snippet_named, spoken_name
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,9 @@ logger = logging.getLogger(__name__)
 DEVICE_REFRESH_SECONDS = 60.0  # re-read the mic list before a start if it is older than this (costs ~40 ms)
 PREWARM_IDLE_SECONDS = 20.0  # skip the prewarm if OpenAI was used more recently than this
 PENDING_LIMIT = 20
+# Screen names are read while the mic records. At release, wait at most this long (from the key
+# release) for a read that is still running, then go on without it. Keeps the Phase 2b cost under 0.1 s.
+SCREEN_DEADLINE_SECONDS = SCREEN_WAIT_CAP  # 0.08 s
 
 SKIP_MESSAGES = {
     "quiet": "Didn't hear anything. Nothing was sent or pasted.",
@@ -97,6 +102,7 @@ class DictationService:
         dictionary: DictionaryStore | None = None,
         snippets: SnippetStore | None = None,
         learner: Learner | None = None,
+        screen: ScreenReader | None = None,
         dry_run: bool = False,
         assets_dir: Path | None = None,
         post_executor: Executor | None = None,
@@ -109,6 +115,7 @@ class DictationService:
         self.dictionary = dictionary
         self.snippets = snippets
         self.learner = learner
+        self.screen = screen
         self.dry_run = dry_run
         self.assets_dir = assets_dir or config.data_dir / "assets"
         self.now = now
@@ -122,7 +129,9 @@ class DictationService:
         self._session: dict[str, Any] = {}
         self._cancelled: set[int] = set()
         self._pending: OrderedDict[int, dict[str, Any]] = OrderedDict()
-        self._texts: OrderedDict[int, str] = OrderedDict()  # pasted text for auto-learn; never logged
+        # Pasted text and the name spellings seen on screen, for auto-learn; never logged.
+        self._texts: OrderedDict[int, tuple[str, frozenset[str]]] = OrderedDict()
+        self._screen_read: Any = None  # the screen-names read for the recording in progress (a Future)
         self.recent = RecentDictations()  # the recent-dictations window and paste_last; memory only, never logged
         self._watchdog: threading.Timer | None = None
         self._last_api = 0.0
@@ -136,6 +145,8 @@ class DictationService:
         self.load_recent()
         if self.learner is not None:
             self.learner.start()
+        if self.screen is not None:
+            self.screen.start()
 
     def load_recent(self) -> None:
         """Refill recent dictations from today's daily log, so a restart does not empty the window."""
@@ -157,6 +168,8 @@ class DictationService:
         self._cancel_watchdog()
         if self.learner is not None:
             self.learner.close()
+        if self.screen is not None:
+            self.screen.close()
         with self._mic_lock:
             self.mic.close()
         self._post.shutdown(wait=True)
@@ -188,6 +201,7 @@ class DictationService:
             "dictionary_path": self.dictionary.path.as_posix() if self.dictionary else "",
             "snippets_path": self.snippets.path.as_posix() if self.snippets else "",
             "auto_learn": self.learner is not None and self.learner.available,
+            "screen_names": self.screen is not None and self.screen.available,
             "tap_ms": h.tap_ms,
             "double_tap_ms": h.double_tap_ms,
             "max_seconds": int(d.max_seconds),
@@ -207,7 +221,13 @@ class DictationService:
                 logger.warning("Dictation id=%s: new start while recording; dropped the old recording", self._id)
                 self._discard_locked()
             started = time.perf_counter()
-            self._open_mic()
+            # Read the focused window's names while the mic records, so release does not wait for it.
+            self._screen_read = self.screen.begin() if self.screen is not None else None
+            try:
+                self._open_mic()
+            except Exception:
+                self._screen_read = None
+                raise
             self._id += 1
             self._state = "recording"
             self._session = {
@@ -258,6 +278,7 @@ class DictationService:
 
     def _discard_locked(self) -> None:
         self._cancel_watchdog()
+        self._screen_read = None
         with self._mic_lock:
             self.mic.cancel()
         self._state = "idle"
@@ -308,8 +329,9 @@ class DictationService:
             self._cancel_watchdog()
             self._state = "processing"
             dictation_id, session = self._id, dict(self._session)
+            screen_read, self._screen_read = self._screen_read, None
         try:
-            result = self._finish(dictation_id, session, mode, released)
+            result = self._finish(dictation_id, session, mode, released, screen_read)
         except Exception as exc:
             logger.exception("Dictation id=%s failed", dictation_id)
             result = StopResult("error", dictation_id, message=f"Dictation failed ({type(exc).__name__}).")
@@ -322,7 +344,9 @@ class DictationService:
             self._state = "idle"
         return result
 
-    def _finish(self, dictation_id: int, record: dict[str, Any], mode: str, released: float) -> StopResult:
+    def _finish(
+        self, dictation_id: int, record: dict[str, Any], mode: str, released: float, screen_read: Any = None
+    ) -> StopResult:
         d = self.config.dictation
         with self._mic_lock:
             raw = self.mic.stop()
@@ -347,7 +371,11 @@ class DictationService:
         data = encode(clip.audio, clip.sample_rate, d.upload_format)
         encoded = time.perf_counter()
         record.update(encode=_r(encoded - prepped), upload_kb=round(len(data) / 1024))
+        screen = self._screen_result(screen_read, released, record)
         keywords = self.dictionary.keywords() if self.dictionary else self.keywords
+        if screen is not None and screen.names.names:
+            limit = self.dictionary.max_keywords if self.dictionary else self.config.dictionary.max_keywords
+            keywords = merge_keywords(clean_keywords(screen.names.names), keywords, limit)
         record["keywords"] = len(keywords)
         note = ""
 
@@ -386,6 +414,8 @@ class DictationService:
         raw_text = timed.text
         c = self.config.cleanup
         words = self.dictionary.current() if self.dictionary else None
+        seen = frozenset(screen.names.words) if screen is not None else frozenset()
+        fixer = NameFix(set(seen), words.prefer if words else {})
         snippet = self._find_snippet(raw_text, words.replace if words else {})
         if snippet is not None:
             text = snippet.text
@@ -396,9 +426,10 @@ class DictationService:
                 note = "snippets.yaml has an error, so this may have been a snippet. Run gpw snippets to see it."
             cleaned = clean_dictation(
                 raw_text, words.replace if words else {}, terms=words.terms if words else [],
-                fillers=c.remove_fillers, commands=c.spoken_commands, ai=self.clean,
+                fillers=c.remove_fillers, commands=c.spoken_commands, ai=self.clean, names=fixer,
             )
             text = cleaned.text
+            self._log_names(dictation_id, screen, fixer, record)
             if cleaned.ai_seconds is not None:
                 record.update(cleanup=_r(cleaned.ai_seconds), cleanup_ai=cleaned.ai_status)
                 if cleaned.ai_status == "rejected":
@@ -427,7 +458,7 @@ class DictationService:
             while len(self._pending) > PENDING_LIMIT:
                 self._pending.popitem(last=False)
             if self.learner is not None and snippet is None:  # editing a snippet teaches nothing about speech
-                self._texts[dictation_id] = text
+                self._texts[dictation_id] = (text, seen)
                 while len(self._texts) > PENDING_LIMIT:
                     self._texts.popitem(last=False)
             when = datetime.fromisoformat(record["ts"])
@@ -436,6 +467,41 @@ class DictationService:
         logged = label or text
         self._post.submit(self._after_success, dictation_id, raw, rate, logged, raw_text, clip.raw_seconds, when)
         return StopResult("ok", dictation_id, text=text, note=note)
+
+    def _screen_result(self, screen_read: Any, released: float, record: dict[str, Any]) -> ScreenResult | None:
+        """Names read off the focused window, if the read is done by the deadline."""
+        if self.screen is None:
+            return None
+        waited = time.perf_counter()
+        result = self.screen.collect(screen_read, released + SCREEN_DEADLINE_SECONDS)
+        record.update(screen=result.status, screen_wait=_r(time.perf_counter() - waited))
+        if result.app:
+            record["screen_app"] = result.app
+        if result.status == "ok":
+            record.update(screen_names=result.found, screen_read=_r(result.seconds))
+        return result
+
+    def _log_names(self, dictation_id: int, screen: ScreenResult | None, fixer: NameFix, record: dict[str, Any]) -> None:
+        """Which app was read, how many names, what changed. The names only with debug_log_transcripts."""
+        if fixer.changed or fixer.ambiguous:
+            record.update(names_fixed=fixer.changed, names_ambiguous=fixer.ambiguous)
+        if screen is None and not fixer.changed:
+            return
+        logger.info(
+            "Dictation id=%s screen names status=%s app=%s found=%s read=%s wait=%.3fs "
+            "fixed=%s (screen=%s preferred=%s) ambiguous=%s",
+            dictation_id, screen.status if screen else "off", (screen.app if screen else "") or "-",
+            screen.found if screen else 0,
+            f"{screen.seconds:.3f}s" if screen and screen.status == "ok" else "-",
+            record.get("screen_wait", 0.0), fixer.changed, fixer.from_screen, fixer.from_prefer, fixer.ambiguous,
+        )
+        if self.config.debug_log_transcripts:
+            if screen is not None and screen.names.names:
+                logger.info("Dictation id=%s screen names: %s", dictation_id, ", ".join(screen.names.names))
+            if fixer.changes:
+                logger.info(
+                    "Dictation id=%s name spellings: %s", dictation_id, "; ".join(f"{a} -> {b}" for a, b in fixer.changes)
+                )
 
     def _find_snippet(self, raw_text: str, replace: dict[str, str]) -> Snippet | None:
         if self.snippets is None:
@@ -483,8 +549,8 @@ class DictationService:
     def watch_for_corrections(self, dictation_id: int) -> int:
         """Start auto-learn on the field the text was just pasted into. Returns the watch time in ms, or 0."""
         with self._lock:
-            text = self._texts.pop(dictation_id, None)
-        if self.learner is None or text is None or not self.learner.watch(dictation_id, text):
+            pasted = self._texts.pop(dictation_id, None)
+        if self.learner is None or pasted is None or not self.learner.watch(dictation_id, pasted[0], seen=pasted[1]):
             return 0
         return int(self.learner.seconds * 1000)
 

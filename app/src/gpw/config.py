@@ -35,6 +35,13 @@ class HotkeyConfig:
     double_tap_ms: int = 400
 
 
+# Never read for screen names. ".exe" entries match the program; others match words in the window title.
+SCREEN_NAMES_SKIP = (
+    "1Password.exe", "Bitwarden.exe", "Dashlane.exe", "KeePass.exe", "KeePassXC.exe",
+    "Keeper.exe", "LastPass.exe", "RoboForm.exe", "CredentialUIBroker.exe", "LogonUI.exe",
+)
+
+
 @dataclass(frozen=True)
 class DictationConfig:
     audio_prep: str = "light"
@@ -49,6 +56,8 @@ class DictationConfig:
     sounds: bool = True
     paste_restore_ms: int = 250
     prewarm_connection: bool = True
+    screen_names: bool = True  # Phase 2b: spell names the way the focused window shows them
+    screen_names_skip: tuple[str, ...] = SCREEN_NAMES_SKIP
 
     @property
     def max_seconds(self) -> float:
@@ -211,6 +220,10 @@ def parse_dictation(raw: dict[str, Any]) -> DictationConfig:
         sounds=bool(raw.get("sounds", d.sounds)),
         paste_restore_ms=int(raw.get("paste_restore_ms", d.paste_restore_ms)),
         prewarm_connection=bool(raw.get("prewarm_connection", d.prewarm_connection)),
+        screen_names=bool(raw.get("screen_names", d.screen_names)),
+        screen_names_skip=(
+            tuple(_str_list(raw["screen_names_skip"])) if raw.get("screen_names_skip") is not None else d.screen_names_skip
+        ),
     )
 
 

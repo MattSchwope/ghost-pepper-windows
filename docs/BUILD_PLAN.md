@@ -223,9 +223,13 @@ prefer:            # default spelling when the screen gives no clue; the screen 
 
 **Done when**
 - [ ] With one spelling of a name on screen, a dictation that says the name pastes that spelling in at least 95% of tries, in Outlook, Chrome (Gmail and LinkedIn), Teams and Slack.
-- [ ] With two spellings of the same name on screen, the transcribed word is left alone (test).
+- [x] With two spellings of the same name on screen, the transcribed word is left alone (test).
 - [ ] Median release-to-paste with `screen_names` on is within 0.1 seconds of off, over 50 dictations.
-- [ ] Screen text is never written to disk or logs, and only the picked-out names are sent to OpenAI (test).
+- [x] Screen text is never written to disk or logs, and only the picked-out names are sent to OpenAI (test).
+
+How to check: `test_two_spellings_on_screen_leave_the_word_alone` and `test_eval_two_spellings_on_screen_leave_the_word_alone` cover the second box, and `test_screen_text_never_reaches_logs_disk_or_openai` the fourth. `test_eval_one_spelling_on_screen_is_pasted` runs dictations against window text shaped like Outlook, Gmail, LinkedIn, Teams and Slack, as an offline stand-in for the first box; the real check is dictating names in those apps and reading the log line `screen names status=ok app=<exe> found=<n> ... fixed=<n>`. For the third, `gpw latency` compares release-to-paste with screen names on and off. The service waits at most 0.08 seconds after release for a read that is still running (`test_a_slow_window_costs_at_most_the_deadline`). A first try on a busy Chrome window took about 0.5 seconds to read, all of it while the key was held, so only very short dictations go without names (`screen=late` in the timing log).
+
+Built: names are matched against `app/src/gpw/name_data.py`, a list of common first names with their variant spellings, so known names only match their own variants (Sean and Shawn, never Sean and Shane, Dan and Don, or Jon and Joan). Other names, mostly surnames, match by a small Metaphone-style key, the first vowel sound and spelling similarity (Smith and Smyth). Plain Double Metaphone keys Sean and Shawn differently, which is why it is not used as is.
 
 ## Phase 2c: Recent dictations
 
@@ -408,4 +412,5 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 12. "Snippets paste in under 0.3 seconds" can only hold from the transcript to the paste. The phrase has to reach GPT-Transcribe first, and short clips took a median of about 1.5 seconds there in the first live logs. Measuring from key release would need a way around speech, such as a hotkey per snippet, or a faster transcript from Phase 1b or Phase 6.
 13. Snippets fire only when "insert <name>" is the whole dictation. "Thanks for your time. Insert signature." stays as words. Firing on a sentence of its own inside a longer dictation would be handy for email sign-offs, at some risk of accidental fires.
 14. Phase 2b reads only the window you dictate into. Often the name was on a different screen a moment ago, such as a LinkedIn profile before switching to Outlook. A short memory of names seen in recent windows (a few minutes, in memory only) would catch that, at the cost of more screen reading.
-15. Phase 2b changes only capitalized words, so "mark the date" never becomes "Marc". Names GPT-Transcribe returns in lowercase are not fixed. Check the logs for how often that happens.
+15. Phase 2b changes only capitalized words, so "mark the date" never becomes "Marc". Names GPT-Transcribe returns in lowercase are not fixed. Check the logs for how often that happens. Common words that are also names (Mark, Will, Grace) are never changed at the start of a sentence.
+16. Phase 2b reads the whole foreground window, including browser tabs and toolbars, and keeps the 30 most frequent names. On a busy page that fills all 30 slots with names that have nothing to do with the dictation. Reading only the focused pane, or weighting names near the focused field, could help if wrong respellings show up.
