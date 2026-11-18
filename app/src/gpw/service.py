@@ -1,4 +1,4 @@
-"""The always-running dictation service: mic, clip prep, GPT-Transcribe, timing logs, daily log.
+"""The always-running dictation service: mic, clip prep, GPT-Transcribe, snippets, cleanup, timing logs, daily log.
 
 The AutoHotkey script drives it over HTTP on 127.0.0.1 (server.py, ADR-003). Transcript
 text goes back to the script and into the daily note, never into the log unless
@@ -22,12 +22,17 @@ import numpy as np
 import soundfile as sf
 
 from . import __version__
+from .autolearn import Learner
+from .cleanup import clean_dictation
 from .clip_prep import encode, ffmpeg_filter, prepare_clip
 from .config import AppConfig
+from .dictionary import DictionaryStore, apply_replacements
 from .engines import TimedText, clean_keywords
 from .latency import append_record
 from .markdown_store import append_daily_dictation
 from .mic import MicCapture, MicError, MicTimeout
+from .recent import RecentDictation, RecentDictations, from_daily_log, snippet_label
+from .snippets import Snippet, SnippetStore, match_snippet, snippet_named, spoken_name
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,7 @@ class StopResult:
     dictation_id: int
     text: str = ""
     message: str = ""
+    note: str = ""  # shown after the paste, such as a dictionary problem
 
 
 def _r(seconds: float) -> float:
@@ -88,6 +94,9 @@ class DictationService:
         mic: MicCapture,
         *,
         clean: Callable[[str], str] | None = None,
+        dictionary: DictionaryStore | None = None,
+        snippets: SnippetStore | None = None,
+        learner: Learner | None = None,
         dry_run: bool = False,
         assets_dir: Path | None = None,
         post_executor: Executor | None = None,
@@ -96,11 +105,14 @@ class DictationService:
         self.config = config
         self.engine = engine
         self.mic = mic
-        self.clean = clean
+        self.clean = clean  # the optional text-model pass (cleanup.ai_pass)
+        self.dictionary = dictionary
+        self.snippets = snippets
+        self.learner = learner
         self.dry_run = dry_run
         self.assets_dir = assets_dir or config.data_dir / "assets"
         self.now = now
-        self.keywords = clean_keywords(config.keywords)
+        self.keywords = clean_keywords(config.keywords)  # used when there is no dictionary file
         self.latency_log = config.logs_dir / "dictation-latency.jsonl"
         self._post = post_executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpw-post")
         self._lock = threading.Lock()  # service state
@@ -110,6 +122,8 @@ class DictationService:
         self._session: dict[str, Any] = {}
         self._cancelled: set[int] = set()
         self._pending: OrderedDict[int, dict[str, Any]] = OrderedDict()
+        self._texts: OrderedDict[int, str] = OrderedDict()  # pasted text for auto-learn; never logged
+        self.recent = RecentDictations()  # the recent-dictations window and paste_last; memory only, never logged
         self._watchdog: threading.Timer | None = None
         self._last_api = 0.0
         self._last_refresh = time.monotonic()
@@ -119,9 +133,30 @@ class DictationService:
         """Open the mic now when warm_mic is on, so the first dictation has pre-roll."""
         with self._mic_lock:
             self.mic.open_warm()
+        self.load_recent()
+        if self.learner is not None:
+            self.learner.start()
+
+    def load_recent(self) -> None:
+        """Refill recent dictations from today's daily log, so a restart does not empty the window."""
+        if not self.config.dictation.daily_log:
+            return
+        try:
+            items = from_daily_log(self.config.notes_dir, self.now().date(), self._snippet_text)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("Could not read today's daily log for recent dictations: %s", exc)
+            return
+        self.recent.extend(items)
+        logger.info("Recent dictations: %s refilled from today's daily log", len(items))
+
+    def _snippet_text(self, name: str) -> str | None:
+        snippet = snippet_named(name, self.snippets.current()) if self.snippets is not None else None
+        return snippet.text if snippet is not None else None
 
     def close(self) -> None:
         self._cancel_watchdog()
+        if self.learner is not None:
+            self.learner.close()
         with self._mic_lock:
             self.mic.close()
         self._post.shutdown(wait=True)
@@ -147,6 +182,12 @@ class DictationService:
             "mic": self.mic.mic_name,
             "dictate_key": h.dictate,
             "cancel_key": h.cancel,
+            "add_word_key": h.add_word,
+            "recent_key": h.recent,
+            "paste_last_key": h.paste_last,
+            "dictionary_path": self.dictionary.path.as_posix() if self.dictionary else "",
+            "snippets_path": self.snippets.path.as_posix() if self.snippets else "",
+            "auto_learn": self.learner is not None and self.learner.available,
             "tap_ms": h.tap_ms,
             "double_tap_ms": h.double_tap_ms,
             "max_seconds": int(d.max_seconds),
@@ -276,6 +317,7 @@ class DictationService:
             if dictation_id in self._cancelled:
                 self._cancelled.discard(dictation_id)
                 self._pending.pop(dictation_id, None)
+                self.recent.remove(dictation_id)
                 result = StopResult("cancelled", dictation_id)
             self._state = "idle"
         return result
@@ -305,11 +347,29 @@ class DictationService:
         data = encode(clip.audio, clip.sample_rate, d.upload_format)
         encoded = time.perf_counter()
         record.update(encode=_r(encoded - prepped), upload_kb=round(len(data) / 1024))
-        try:
-            timed = self.engine.transcribe_clip(
-                f"dictation.{d.upload_format}", data, self.keywords, self.config.languages,
-                timeout=30 + clip.seconds,
+        keywords = self.dictionary.keywords() if self.dictionary else self.keywords
+        record["keywords"] = len(keywords)
+        note = ""
+
+        def transcribe(words: list[str]) -> TimedText:
+            return self.engine.transcribe_clip(
+                f"dictation.{d.upload_format}", data, words, self.config.languages, timeout=30 + clip.seconds,
             )
+
+        try:
+            try:
+                timed = transcribe(keywords)
+            except Exception as exc:
+                if type(exc).__name__ != "BadRequestError" or not keywords:
+                    raise
+                # The keyword cap is untested; a long dictionary must not break dictation.
+                logger.warning(
+                    "Dictation id=%s: OpenAI refused the request with %s dictionary hints; retrying without them",
+                    dictation_id, len(keywords),
+                )
+                record["keywords_dropped"] = True
+                note = "OpenAI refused the dictionary hints, so this one went without them. See the log."
+                timed = transcribe([])
         except Exception as exc:
             record.update(status="error", error=type(exc).__name__, api=_r(time.perf_counter() - encoded))
             logger.error(
@@ -319,18 +379,30 @@ class DictationService:
             append_record(self.latency_log, record)
             self._post.submit(self._save_audio, dictation_id, raw, rate)
             return StopResult("error", dictation_id, message=friendly_error(exc))
+        transcribed = time.perf_counter()
         self._last_api = time.monotonic()
         record.update(api=_r(timed.api_seconds), server=timed.server_seconds)
 
-        raw_text = text = timed.text
-        if self.clean is not None and raw_text:
-            cleaned = time.perf_counter()
-            try:
-                text = self.clean(raw_text) or raw_text
-            except Exception as exc:
-                logger.error("Dictation id=%s cleanup failed (%s); using the raw transcript", dictation_id, type(exc).__name__)
-                text = raw_text
-            record["cleanup"] = _r(time.perf_counter() - cleaned)
+        raw_text = timed.text
+        c = self.config.cleanup
+        words = self.dictionary.current() if self.dictionary else None
+        snippet = self._find_snippet(raw_text, words.replace if words else {})
+        if snippet is not None:
+            text = snippet.text
+            record.update(snippet=True, transcribed=_r(transcribed - released))
+            logger.info("Dictation id=%s matched a snippet", dictation_id)
+        else:
+            if self.snippets is not None and self.snippets.error and spoken_name(raw_text):
+                note = "snippets.yaml has an error, so this may have been a snippet. Run gpw snippets to see it."
+            cleaned = clean_dictation(
+                raw_text, words.replace if words else {}, terms=words.terms if words else [],
+                fillers=c.remove_fillers, commands=c.spoken_commands, ai=self.clean,
+            )
+            text = cleaned.text
+            if cleaned.ai_seconds is not None:
+                record.update(cleanup=_r(cleaned.ai_seconds), cleanup_ai=cleaned.ai_status)
+                if cleaned.ai_status == "rejected":
+                    logger.warning("Dictation id=%s: the text model changed words, so its cleanup was not used", dictation_id)
         if not text.strip():
             return self._skipped(dictation_id, record, "empty_transcript")
 
@@ -354,9 +426,23 @@ class DictationService:
             self._pending[dictation_id] = record
             while len(self._pending) > PENDING_LIMIT:
                 self._pending.popitem(last=False)
-        when = datetime.fromisoformat(record["ts"])
-        self._post.submit(self._after_success, dictation_id, raw, rate, text, raw_text, clip.raw_seconds, when)
-        return StopResult("ok", dictation_id, text=text)
+            if self.learner is not None and snippet is None:  # editing a snippet teaches nothing about speech
+                self._texts[dictation_id] = text
+                while len(self._texts) > PENDING_LIMIT:
+                    self._texts.popitem(last=False)
+            when = datetime.fromisoformat(record["ts"])
+            label = snippet_label(snippet.name) if snippet is not None else ""
+            self.recent.add(RecentDictation(when, text, label=label, dictation_id=dictation_id))
+        logged = label or text
+        self._post.submit(self._after_success, dictation_id, raw, rate, logged, raw_text, clip.raw_seconds, when)
+        return StopResult("ok", dictation_id, text=text, note=note)
+
+    def _find_snippet(self, raw_text: str, replace: dict[str, str]) -> Snippet | None:
+        if self.snippets is None:
+            return None
+        snippets = self.snippets.current()
+        # Dictionary fixes first, so a misheard name still matches; then as heard, for a name spelled the way it is heard.
+        return match_snippet(apply_replacements(raw_text, replace), snippets) or match_snippet(raw_text, snippets)
 
     def _skipped(self, dictation_id: int, record: dict[str, Any], reason: str) -> StopResult:
         record.update(status="skipped", reason=reason)
@@ -368,8 +454,12 @@ class DictationService:
         return StopResult("skipped", dictation_id, message=SKIP_MESSAGES[reason])
 
     # -- after the paste --
-    def pasted(self, dictation_id: int, release_to_paste_ms: int, paste_ms: int, clipboard_restored: bool | None) -> bool:
-        """Record what the hotkey script measured: key release to text pasted."""
+    def pasted(
+        self, dictation_id: int, release_to_paste_ms: int, paste_ms: int, clipboard_restored: bool | None, app: str = ""
+    ) -> bool:
+        """Record what the hotkey script measured: key release to text pasted, and the program it went to."""
+        if app:
+            self.recent.set_app(dictation_id, app)  # shown in the recent-dictations window; never logged
         with self._lock:
             record = self._pending.pop(dictation_id, None)
         if record is None:
@@ -378,6 +468,10 @@ class DictationService:
         record.update(status="pasted", release_to_paste=_r(release_to_paste_ms / 1000), paste=_r(paste_ms / 1000))
         if clipboard_restored is not None:
             record["clipboard_restored"] = clipboard_restored
+        if record.get("snippet"):
+            # The local part of a snippet. Tiny clock gaps between the script and the service can make it just below 0.
+            record["transcript_to_paste"] = _r(max(0.0, record["release_to_paste"] - record["transcribed"]))
+            logger.info("Dictation id=%s snippet transcript_to_paste=%.3fs", dictation_id, record["transcript_to_paste"])
         append_record(self.latency_log, record)
         logger.info(
             "Dictation id=%s pasted release_to_paste=%.2fs paste=%.3fs clipboard_restored=%s",
@@ -385,6 +479,27 @@ class DictationService:
             "unknown" if clipboard_restored is None else str(clipboard_restored).lower(),
         )
         return True
+
+    def watch_for_corrections(self, dictation_id: int) -> int:
+        """Start auto-learn on the field the text was just pasted into. Returns the watch time in ms, or 0."""
+        with self._lock:
+            text = self._texts.pop(dictation_id, None)
+        if self.learner is None or text is None or not self.learner.watch(dictation_id, text):
+            return 0
+        return int(self.learner.seconds * 1000)
+
+    def take_learned(self) -> list[tuple[str, str]]:
+        return self.learner.take_learned() if self.learner is not None else []
+
+    def add_word(self, word: str) -> tuple[bool, str]:
+        """The add-word hotkey: append the selected text to dictionary terms."""
+        if self.dictionary is None:
+            raise ValueError("There is no dictionary file.")
+        added = self.dictionary.add_term(word)
+        count = len(self.dictionary.current().terms)
+        logger.info("Dictionary: add-word %s (%s terms)", "added a term" if added else "found it already there", count)
+        term = " ".join(word.split())
+        return added, (f'Added "{term}" to the dictionary.' if added else f'"{term}" is already in the dictionary.')
 
     def _after_success(
         self, dictation_id: int, raw: np.ndarray, rate: int, text: str, raw_text: str, seconds: float, when: datetime

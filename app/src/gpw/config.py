@@ -28,6 +28,9 @@ class OpenAIConfig:
 class HotkeyConfig:
     dictate: str = "RCtrl"
     cancel: str = "Esc"
+    add_word: str = "^!d"  # AutoHotkey syntax: Ctrl+Alt+D. Empty turns it off.
+    recent: str = "^!h"  # Ctrl+Alt+H: the recent-dictations window. Empty turns it off.
+    paste_last: str = "^!l"  # Ctrl+Alt+L: paste the latest dictation again. Empty turns it off.
     tap_ms: int = 250
     double_tap_ms: int = 400
 
@@ -56,6 +59,25 @@ UPLOAD_FORMATS = ("flac", "wav")
 
 
 @dataclass(frozen=True)
+class CleanupConfig:
+    remove_fillers: bool = True
+    spoken_commands: bool = True
+
+
+@dataclass(frozen=True)
+class DictionaryConfig:
+    path: Path | None = None  # None: <data_dir>/dictionary.yaml
+    max_keywords: int = 100
+    auto_learn: bool = False
+    learn_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
+class SnippetsConfig:
+    path: Path | None = None  # None: <data_dir>/snippets.yaml
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_dir: Path
     audio_dir: Path
@@ -78,10 +100,21 @@ class AppConfig:
     service_port: int = 8765
     hotkeys: HotkeyConfig = HotkeyConfig()
     dictation: DictationConfig = DictationConfig()
+    cleanup: CleanupConfig = CleanupConfig()
+    dictionary: DictionaryConfig = DictionaryConfig()
+    snippets: SnippetsConfig = SnippetsConfig()
 
     @property
     def work_dir(self) -> Path:
         return self.data_dir / ".work"
+
+    @property
+    def dictionary_path(self) -> Path:
+        return self.dictionary.path or self.data_dir / "dictionary.yaml"
+
+    @property
+    def snippets_path(self) -> Path:
+        return self.snippets.path or self.data_dir / "snippets.yaml"
 
 
 def _str_list(value: Any) -> list[str]:
@@ -108,14 +141,52 @@ def _positive(value: Any, setting: str, cast: type = int) -> Any:
     return number
 
 
+_KEY_ALIASES = {"control": "ctrl", "lcontrol": "lctrl", "rcontrol": "rctrl", "escape": "esc", "return": "enter"}
+
+
+def hotkey_identity(hotkey: str) -> tuple[frozenset[str], str]:
+    """An AutoHotkey hotkey reduced to (modifiers, key), so "^!h", "!^H" and "*^!h" compare equal."""
+    mods = {"^": "ctrl", "!": "alt", "+": "shift", "#": "win"}
+    found: set[str] = set()
+    i = 0
+    while i < len(hotkey) - 1 and hotkey[i] in "^!+#~*$<>":  # the last character is always the key
+        if hotkey[i] in mods:
+            found.add(mods[hotkey[i]])
+        i += 1
+    key = hotkey[i:].strip().lower()
+    return frozenset(found), _KEY_ALIASES.get(key, key)
+
+
+def check_hotkeys(keys: dict[str, str]) -> None:
+    """Refuse two settings in the hotkeys: block that name the same key. Empty ones are off."""
+    seen: dict[tuple[frozenset[str], str], str] = {}
+    for setting, hotkey in keys.items():
+        if not hotkey:
+            continue
+        identity = hotkey_identity(hotkey)
+        if identity in seen:
+            raise ValueError(
+                f"hotkeys.{seen[identity]} and hotkeys.{setting} are the same key ({hotkey}); give one of them another key"
+            )
+        seen[identity] = setting
+
+
 def parse_hotkeys(raw: dict[str, Any]) -> HotkeyConfig:
     d = HotkeyConfig()
-    return HotkeyConfig(
+    hotkeys = HotkeyConfig(
         dictate=str(raw.get("dictate", d.dictate)).strip() or d.dictate,
         cancel=str(raw.get("cancel", d.cancel)).strip() or d.cancel,
+        add_word=str(raw.get("add_word", d.add_word) or "").strip(),
+        recent=str(raw.get("recent", d.recent) or "").strip(),
+        paste_last=str(raw.get("paste_last", d.paste_last) or "").strip(),
         tap_ms=_positive(raw.get("tap_ms", d.tap_ms), "hotkeys.tap_ms"),
         double_tap_ms=_positive(raw.get("double_tap_ms", d.double_tap_ms), "hotkeys.double_tap_ms"),
     )
+    check_hotkeys({
+        "dictate": hotkeys.dictate, "cancel": hotkeys.cancel, "add_word": hotkeys.add_word,
+        "recent": hotkeys.recent, "paste_last": hotkeys.paste_last,
+    })
+    return hotkeys
 
 
 def parse_dictation(raw: dict[str, Any]) -> DictationConfig:
@@ -141,6 +212,22 @@ def parse_dictation(raw: dict[str, Any]) -> DictationConfig:
         paste_restore_ms=int(raw.get("paste_restore_ms", d.paste_restore_ms)),
         prewarm_connection=bool(raw.get("prewarm_connection", d.prewarm_connection)),
     )
+
+
+def parse_dictionary_config(raw: dict[str, Any]) -> DictionaryConfig:
+    d = DictionaryConfig()
+    path = raw.get("path")
+    return DictionaryConfig(
+        path=Path(path) if path else None,
+        max_keywords=_positive(raw.get("max_keywords", d.max_keywords), "dictionary.max_keywords"),
+        auto_learn=bool(raw.get("auto_learn", d.auto_learn)),
+        learn_seconds=_positive(raw.get("learn_seconds", d.learn_seconds), "dictionary.learn_seconds", float),
+    )
+
+
+def parse_snippets_config(raw: dict[str, Any]) -> SnippetsConfig:
+    path = raw.get("path")
+    return SnippetsConfig(path=Path(path) if path else None)
 
 
 def parse_config(raw: dict[str, Any]) -> AppConfig:
@@ -192,14 +279,21 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         audio_prep=audio_prep,
         chunk_minutes=chunk_minutes,
         keywords=_str_list(transcription.get("keywords")),
-        cleanup_enabled=bool(cleanup.get("enabled", False)),
-        prompt_profile=str(cleanup.get("prompt_profile", "general_cleanup")),
+        # ai_pass was called enabled before Phase 2; both still work.
+        cleanup_enabled=bool(cleanup.get("ai_pass", cleanup.get("enabled", False))),
+        prompt_profile=str(cleanup.get("prompt_profile", "dictation_light")),
         save_notes=bool(markdown.get("save_notes", True)),
         debug_log_transcripts=bool(privacy.get("debug_log_transcripts", False)),
         delete_audio_after_success=bool(privacy.get("delete_audio_after_success", False)),
         service_port=port,
         hotkeys=parse_hotkeys(raw.get("hotkeys") or {}),
         dictation=parse_dictation(raw.get("dictation") or {}),
+        cleanup=CleanupConfig(
+            remove_fillers=bool(cleanup.get("remove_fillers", True)),
+            spoken_commands=bool(cleanup.get("spoken_commands", True)),
+        ),
+        dictionary=parse_dictionary_config(raw.get("dictionary") or {}),
+        snippets=parse_snippets_config(raw.get("snippets") or {}),
     )
 
 

@@ -10,6 +10,7 @@ from datetime import datetime
 import numpy as np
 import pytest
 import soundfile as sf
+import yaml
 
 from gpw.config import parse_config
 from gpw.engines import TimedText
@@ -95,11 +96,11 @@ def make_config(tmp_path, **sections):
 def make_service(tmp_path):
     services = []
 
-    def factory(mic=None, engine=None, clean=None, **sections):
+    def factory(mic=None, engine=None, clean=None, dictionary=None, snippets=None, learner=None, **sections):
         config = make_config(tmp_path, **sections)
         service = DictationService(
-            config, engine or FakeEngine(), mic or FakeMic(), clean=clean,
-            now=lambda: datetime(2026, 10, 28, 9, 15, 0),
+            config, engine or FakeEngine(), mic or FakeMic(), clean=clean, dictionary=dictionary, snippets=snippets,
+            learner=learner, now=lambda: datetime(2026, 10, 28, 9, 15, 0),
         )
         services.append(service)
         return service
@@ -369,3 +370,260 @@ def test_health_reports_settings_for_the_hotkey_script(make_service):
     assert health["max_seconds"] == 180 and health["sounds"] is False
     assert health["assets_dir"].endswith("data/assets")
     json.dumps(health)
+
+
+# -- Phase 2: dictionary, cleanup, auto-learn --
+
+class BadRequestError(Exception):
+    """Stands in for openai.BadRequestError; the service matches on the class name."""
+
+
+@pytest.fixture
+def dictionary(tmp_path):
+    from gpw.dictionary import DictionaryStore
+
+    path = tmp_path / "dictionary.yaml"
+    path.write_text('terms: [Kavaliro, TS/SCI]\nreplace:\n  "dana": "Dana"\n  "cavaliro": "Kavaliro"\n', encoding="utf-8")
+    return DictionaryStore(path, ["SOCOM", "Kavaliro"], max_keywords=100)
+
+
+def test_dictionary_terms_go_out_first_and_fixes_apply(make_service, dictionary):
+    engine = FakeEngine(text="Um, send the cavaliro notes to dana. New paragraph. Thanks.")
+    service = make_service(engine=engine, dictionary=dictionary)
+    service.start()
+    result = service.stop()
+    assert engine.calls[0]["keywords"] == ["Kavaliro", "TS/SCI", "SOCOM"]
+    assert result.text == "Send the Kavaliro notes to Dana.\n\nThanks."
+    service.pasted(result.dictation_id, 1500, 30, True)
+    service.wait_for_background()
+    daily = (service.config.notes_dir / "dictation" / "2026-10-28.md").read_text(encoding="utf-8")
+    assert "**Raw transcript:** Um, send the cavaliro notes" in daily
+    assert "cavaliro" not in json.dumps(latency_records(service)).lower()
+
+
+def test_cleanup_rules_can_be_turned_off(make_service):
+    service = make_service(engine=FakeEngine(text="Um, new line done."), cleanup={"remove_fillers": False, "spoken_commands": False})
+    service.start()
+    assert service.stop().text == "Um, new line done."
+
+
+def test_refused_dictionary_hints_are_dropped_for_that_dictation(make_service, dictionary, caplog):
+    class Refuses(FakeEngine):
+        def transcribe_clip(self, filename, data, keywords, languages, timeout):
+            if keywords:
+                self.calls.append({"keywords": keywords})
+                raise BadRequestError("keywords")
+            return super().transcribe_clip(filename, data, keywords, languages, timeout)
+
+    engine = Refuses()
+    service = make_service(engine=engine, dictionary=dictionary)
+    service.start()
+    result = service.stop()
+    assert result.status == "ok" and result.text == SECRET and "dictionary hints" in result.note
+    assert [len(c["keywords"]) for c in engine.calls] == [3, 0]
+    service.pasted(result.dictation_id, 1500, 30, True)
+    record = latency_records(service)[-1]
+    assert record["keywords"] == 3 and record["keywords_dropped"] is True
+
+
+def test_a_request_refused_again_without_hints_is_an_error(make_service, dictionary):
+    engine = FakeEngine(error=BadRequestError("audio"))
+    service = make_service(engine=engine, dictionary=dictionary)
+    service.start()
+    # FakeEngine raises for every call: the retry without hints fails too and the error is reported.
+    assert service.stop().status == "error"
+    assert len(engine.calls) == 2
+
+
+def test_text_model_that_changes_words_is_not_used(make_service):
+    service = make_service(engine=FakeEngine(text="send it today"), clean=lambda text: "Send it tomorrow.")
+    service.start()
+    result = service.stop()
+    assert result.text == "send it today"
+    service.pasted(result.dictation_id, 1500, 30, True)
+    assert latency_records(service)[-1]["cleanup_ai"] == "rejected"
+
+
+class FakeLearner:
+    seconds = 15.0
+    available = True
+
+    def __init__(self):
+        self.watched = []
+        self.started = self.closed = False
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+    def watch(self, dictation_id, text):
+        self.watched.append((dictation_id, text))
+        return True
+
+    def take_learned(self):
+        return [("cavaliro", "Kavaliro")]
+
+
+def test_paste_starts_auto_learn_with_the_pasted_text(make_service):
+    learner = FakeLearner()
+    service = make_service(learner=learner)
+    service.open()
+    assert learner.started
+    service.start()
+    result = service.stop()
+    assert service.pasted(result.dictation_id, 1300, 30, True)
+    assert service.watch_for_corrections(result.dictation_id) == 15000
+    assert learner.watched == [(result.dictation_id, SECRET)]
+    assert service.watch_for_corrections(result.dictation_id) == 0  # once per paste
+    assert service.take_learned() == [("cavaliro", "Kavaliro")]
+    assert SECRET not in json.dumps(latency_records(service))
+
+
+def test_without_a_learner_nothing_is_watched(make_service):
+    service = make_service()
+    service.start()
+    result = service.stop()
+    assert service.watch_for_corrections(result.dictation_id) == 0
+    assert service.take_learned() == []
+
+
+def test_add_word(make_service, dictionary, caplog):
+    caplog.set_level(logging.INFO)
+    service = make_service(dictionary=dictionary)
+    assert service.add_word("  SOCOM ") == (True, 'Added "SOCOM" to the dictionary.')
+    assert service.add_word("socom") == (False, '"socom" is already in the dictionary.')
+    assert "SOCOM" in dictionary.current().terms
+    assert "SOCOM" not in caplog.text
+    with pytest.raises(ValueError):
+        service.add_word("x" * 80)
+    with pytest.raises(ValueError):
+        make_service().add_word("SOCOM")
+
+
+def test_health_reports_the_dictionary_and_add_word_key(make_service, dictionary):
+    health = make_service(dictionary=dictionary, learner=FakeLearner()).health()
+    assert health["add_word_key"] == "^!d"
+    assert health["dictionary_path"].endswith("dictionary.yaml") and health["auto_learn"] is True
+    plain = make_service(hotkeys={"add_word": ""}).health()
+    assert plain["add_word_key"] == "" and plain["dictionary_path"] == "" and plain["auto_learn"] is False
+
+
+# -- snippets --
+
+SIGNATURE = "Matt Schwope\nKavaliro\num, new line stays as written"
+
+
+@pytest.fixture
+def snippet_store(tmp_path):
+    from gpw.snippets import SnippetStore
+
+    path = tmp_path / "snippets.yaml"
+    path.write_text(yaml.safe_dump({"signature": SIGNATURE, "cavaliro bio": "Short bio."}), encoding="utf-8")
+    return SnippetStore(path)
+
+
+def dictate(service):
+    service.start()
+    return service.stop()
+
+
+def test_snippet_pastes_as_written_with_no_fixes_no_cleanup_and_no_text_model(make_service, snippet_store, tmp_path):
+    from gpw.dictionary import DictionaryStore
+
+    def text_model(_):
+        raise AssertionError("a snippet must not call the text model")
+
+    words = DictionaryStore(tmp_path / "words.yaml")
+    words.path.write_text('replace: {"schwope": "WRONG"}', encoding="utf-8")
+    engine = FakeEngine(text="Insert signature.")
+    service = make_service(engine=engine, snippets=snippet_store, clean=text_model, dictionary=words)
+
+    result = dictate(service)
+
+    assert (result.status, result.text, result.note) == ("ok", SIGNATURE, "")
+    assert len(engine.calls) == 1
+
+
+def test_words_around_the_phrase_stay_a_normal_dictation(make_service, snippet_store):
+    service = make_service(engine=FakeEngine(text="Please insert signature here."), snippets=snippet_store)
+    result = dictate(service)
+    assert result.text == "Please insert signature here."
+    assert service.pasted(result.dictation_id, 900, 20, True)
+    assert "snippet" not in latency_records(service)[0]
+
+
+def test_an_unknown_name_stays_words_and_gets_normal_cleanup(make_service, snippet_store):
+    result = dictate(make_service(engine=FakeEngine(text="Um, insert outreach."), snippets=snippet_store))
+    assert result.text == "Insert outreach." and result.note == ""
+
+
+def test_dictionary_fixes_help_the_match_either_way(make_service, snippet_store, tmp_path):
+    from gpw.dictionary import DictionaryStore
+
+    words = DictionaryStore(tmp_path / "words.yaml")
+    words.path.write_text('replace: {"cavaliro": "Kavaliro", "signiture": "signature"}', encoding="utf-8")
+    fixed = make_service(engine=FakeEngine(text="Insert signiture."), snippets=snippet_store, dictionary=words)
+    assert dictate(fixed).text == SIGNATURE
+    as_heard = make_service(engine=FakeEngine(text="Insert cavaliro bio."), snippets=snippet_store, dictionary=words)
+    assert dictate(as_heard).text == "Short bio."
+
+
+def test_snippet_timing_is_logged_without_its_name_or_text(make_service, snippet_store, caplog):
+    caplog.set_level(logging.DEBUG)
+    service = make_service(engine=FakeEngine(text="Insert signature."), snippets=snippet_store)
+    result = dictate(service)
+    assert service.pasted(result.dictation_id, 1500, 16, True)
+
+    record = latency_records(service)[0]
+    assert record["snippet"] is True and record["status"] == "pasted"
+    assert 0 <= record["transcribed"] < 1.5
+    assert record["transcript_to_paste"] == pytest.approx(1.5 - record["transcribed"], abs=0.002)
+    timing_log = service.latency_log.read_text(encoding="utf-8")
+    for private in ("signature", "Schwope"):
+        assert private not in caplog.text and private not in timing_log
+    assert "matched a snippet" in caplog.text
+
+
+def test_snippet_timing_never_goes_below_zero(make_service, snippet_store):
+    service = make_service(engine=FakeEngine(text="Insert signature."), snippets=snippet_store)
+    result = dictate(service)
+    assert service.pasted(result.dictation_id, 0, 0, True)
+    assert latency_records(service)[0]["transcript_to_paste"] == 0
+
+
+def test_the_daily_log_names_the_snippet_instead_of_repeating_it(make_service, snippet_store, tmp_path):
+    service = make_service(engine=FakeEngine(text="Insert signature."), snippets=snippet_store)
+    dictate(service)
+    service.wait_for_background()
+    log = (tmp_path / "data" / "notes" / "dictation" / "2026-10-28.md").read_text(encoding="utf-8")
+    assert "[snippet: signature]" in log and "Insert signature." in log
+    assert "Schwope" not in log
+
+
+def test_snippets_do_not_start_auto_learn(make_service, snippet_store):
+    learner = FakeLearner()
+    service = make_service(engine=FakeEngine(text="Insert signature."), snippets=snippet_store, learner=learner)
+    result = dictate(service)
+    assert service.pasted(result.dictation_id, 900, 20, True)
+    assert service.watch_for_corrections(result.dictation_id) == 0
+    assert learner.watched == []
+
+
+def test_a_broken_snippets_file_shows_a_note_only_when_it_could_matter(make_service, tmp_path):
+    from gpw.snippets import SnippetStore
+
+    store = SnippetStore(tmp_path / "snippets.yaml")
+    store.path.write_text("signature: [oops", encoding="utf-8")
+    store.current()
+    result = dictate(make_service(engine=FakeEngine(text="Insert signature."), snippets=store))
+    assert result.text == "Insert signature." and "gpw snippets" in result.note
+    result.note.encode("latin-1")  # it travels in an HTTP header
+    result = dictate(make_service(engine=FakeEngine(text="Just words."), snippets=store))
+    assert result.note == ""
+
+
+def test_health_gives_the_script_the_snippets_path(make_service, snippet_store):
+    assert make_service(snippets=snippet_store).health()["snippets_path"] == snippet_store.path.as_posix()
+    assert make_service().health()["snippets_path"] == ""

@@ -10,7 +10,7 @@ import pytest
 from gpw.mic import MicError
 from gpw.server import make_server
 from gpw.service import DictationService
-from test_service import FakeEngine, FakeMic, make_config
+from test_service import BadRequestError, FakeEngine, FakeLearner, FakeMic, make_config
 
 HEADERS = {"X-GPW-Client": "test"}
 
@@ -19,8 +19,11 @@ HEADERS = {"X-GPW-Client": "test"}
 def running(tmp_path):
     started = []
 
-    def start(engine=None, mic=None):
-        service = DictationService(make_config(tmp_path), engine or FakeEngine(), mic or FakeMic())
+    def start(engine=None, mic=None, dictionary=None, snippets=None, learner=None):
+        service = DictationService(
+            make_config(tmp_path), engine or FakeEngine(), mic or FakeMic(), dictionary=dictionary, snippets=snippets,
+            learner=learner,
+        )
         server = make_server(service, 0)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
@@ -70,7 +73,8 @@ def test_full_dictation_over_http(running):
     assert data.decode("utf-8") == text
 
     response, data = request(server, "POST", "/pasted", "id=1&release_to_paste_ms=1420&paste_ms=30&clipboard_restored=1")
-    assert json.loads(data) == {"ok": True}
+    assert json.loads(data) == {"ok": True, "learn_ms": 0}
+    assert response.getheader("X-Dictation-Note") is None
 
 
 def test_skipped_clip_over_http(running):
@@ -135,3 +139,98 @@ def test_second_service_on_the_same_port_fails_clearly(running, tmp_path):
     with pytest.raises(RuntimeError, match=f"Port {server.server_port} on 127.0.0.1 is taken"):
         make_server(other, server.server_port)
     other.close()
+
+
+def test_paste_report_starts_auto_learn_and_learned_fixes_come_back(running):
+    server, _ = running(learner=FakeLearner())
+    request(server, "POST", "/start")
+    request(server, "POST", "/stop")
+    response, data = request(server, "POST", "/pasted", "id=1&release_to_paste_ms=1400&paste_ms=30&clipboard_restored=1")
+    assert json.loads(data) == {"ok": True, "learn_ms": 15000}
+    response, data = request(server, "POST", "/learned")
+    assert response.status == 200 and data.decode("utf-8") == "cavaliro -> Kavaliro"
+    _, data = request(server, "POST", "/pasted", "id=99&release_to_paste_ms=1&paste_ms=1")
+    assert json.loads(data) == {"ok": False, "learn_ms": 0}
+
+
+def test_add_word_over_http(running, tmp_path):
+    from gpw.dictionary import DictionaryStore
+
+    path = tmp_path / "dictionary.yaml"
+    path.write_text("terms: []\n", encoding="utf-8")
+    server, _ = running(dictionary=DictionaryStore(path))
+    response, data = request(server, "POST", "/dictionary/add", "word=Zo%C3%AB%20%26%20Co")
+    assert response.status == 200
+    assert json.loads(data) == {"ok": True, "added": True, "message": 'Added "Zoë & Co" to the dictionary.'}
+    response, data = request(server, "POST", "/dictionary/add", "word=")
+    assert response.status == 400 and json.loads(data)["error"] == "Nothing selected."
+    response, _ = request(server, "POST", "/dictionary/add", "word=x", headers={"X-GPW-Client": ""})
+    assert response.status == 403
+
+
+def test_note_header_when_dictionary_hints_were_dropped(running, tmp_path):
+    from gpw.dictionary import DictionaryStore
+
+    class Refuses(FakeEngine):
+        def transcribe_clip(self, filename, data, keywords, languages, timeout):
+            if keywords:
+                raise BadRequestError("keywords")
+            return super().transcribe_clip(filename, data, keywords, languages, timeout)
+
+    path = tmp_path / "dictionary.yaml"
+    path.write_text("terms: [Kavaliro]\n", encoding="utf-8")
+    server, _ = running(engine=Refuses(), dictionary=DictionaryStore(path))
+    request(server, "POST", "/start")
+    response, _ = request(server, "POST", "/stop")
+    assert response.getheader("X-Dictation-Status") == "ok"
+    assert "dictionary hints" in response.getheader("X-Dictation-Note")
+
+
+def test_snippet_comes_back_well_inside_the_paste_target(running, tmp_path):
+    """Phase 2 check, as far as it goes without a live run: from the transcript arriving to the text
+    being in the hotkey script's hands, over a real socket, with a long snippet and a big file."""
+    import time
+
+    import yaml
+
+    from gpw.snippets import SnippetStore
+
+    long_text = "\n".join(f"Line {i} of a long multi-line snippet, “quoted” – café." for i in range(200))
+    path = tmp_path / "snippets.yaml"
+    path.write_text(
+        yaml.safe_dump({"signature": long_text, **{f"name {i}": f"Text {i}" for i in range(500)}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    class Timed(FakeEngine):
+        def transcribe_clip(self, *args, **kwargs):
+            result = super().transcribe_clip(*args, **kwargs)
+            self.returned = time.perf_counter()
+            return result
+
+    engine = Timed(text="Insert signature.")
+    server, _ = running(engine=engine, snippets=SnippetStore(path))
+    elapsed = []
+    for _ in range(5):
+        request(server, "POST", "/start")
+        response, data = request(server, "POST", "/stop", "mode=hold")
+        elapsed.append(time.perf_counter() - engine.returned)
+        assert response.getheader("X-Dictation-Status") == "ok"
+        assert data.decode("utf-8") == long_text
+    assert sorted(elapsed)[2] < 0.3
+
+
+def test_recent_over_http_needs_the_client_header_and_lists_the_paste(running):
+    server, service = running()
+    request(server, "POST", "/start")
+    _, _ = request(server, "POST", "/stop")
+    response, data = request(server, "POST", "/pasted", "id=1&release_to_paste_ms=900&paste_ms=20&app=OUTLOOK.EXE")
+    assert response.status == 200 and json.loads(data)["ok"] is True
+    response, data = request(server, "POST", "/recent")
+    assert response.status == 200 and response.getheader("Content-Type").startswith("text/plain")
+    time_, app, label, text = data.decode("utf-8").rstrip("\n").split("\t")
+    assert (app, label, text) == ("OUTLOOK", "", service.recent.newest_first()[0].text)
+    response, _ = request(server, "POST", "/recent", headers={"X-GPW-Client": ""})
+    assert response.status == 403
+    response, _ = request(server, "GET", "/recent")
+    assert response.status == 404  # never readable with a plain GET

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 TARGET_SECONDS = 1.5
 TARGET_COUNT = 50
 TEN_SECOND_CLIPS = (7.0, 13.0)  # "a 10-second clip", with room for how long a key is really held
+SNIPPET_TARGET_SECONDS = 0.3  # from the transcript to the paste; OpenAI still has to hear "insert <name>"
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -75,10 +76,18 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "prep": _median_of(rows, "prep"),
             "record_end": _median_of(rows, "record_end"),
             "paste": _median_of(rows, "paste"),
+            "cleanup": _median_of(rows, "cleanup"),
         }
 
     checked = [r for r in pasted if "clipboard_restored" in r]
+    local = [float(r["transcript_to_paste"]) for r in pasted if isinstance(r.get("transcript_to_paste"), (int, float))]
     return {
+        "snippets": {
+            "count": len(local),
+            "median": percentile(local, 50),
+            "slowest": max(local, default=None),
+            "release_to_paste": _median_of([r for r in pasted if "transcript_to_paste" in r], "release_to_paste"),
+        },
         "pasted": len(pasted),
         "skipped": sum(1 for r in records if r.get("status") == "skipped"),
         "errors": sum(1 for r in records if r.get("status") == "error"),
@@ -107,6 +116,8 @@ def format_report(summary: dict[str, Any], source: Path) -> str:
         ("  of which OpenAI processing", _fmt(a["server"]), _fmt(t["server"])),
         ("Median paste", _fmt(a["paste"]), _fmt(t["paste"])),
     ]
+    if a["cleanup"] is not None:
+        rows.insert(-1, ("Median text-model cleanup", _fmt(a["cleanup"]), _fmt(t["cleanup"])))
     head = ("", "all clips", f"{low:g}-{high:g} s clips")
     width = max(len(r[0]) for r in rows)
     lines = [
@@ -130,4 +141,13 @@ def format_report(summary: dict[str, Any], source: Path) -> str:
         met = "met" if t["median"] <= TARGET_SECONDS else "missed"
         enough = "" if t["count"] >= TARGET_COUNT else f" (only {t['count']} so far; need {TARGET_COUNT})"
         lines.append(f"Result: {t['median']:.2f} s -> {met}{enough}.")
+
+    s = summary["snippets"]
+    if s["count"]:
+        met = "met" if s["median"] < SNIPPET_TARGET_SECONDS else "missed"
+        lines += [
+            f"\nPhase 2 target: snippets paste in under {SNIPPET_TARGET_SECONDS:g} s, from the transcript to the paste.",
+            f"Result: median {s['median']:.3f} s, slowest {s['slowest']:.3f} s, over {s['count']} -> {met}.",
+            f"Release to paste for those: median {_fmt(s['release_to_paste'])}, which includes OpenAI hearing the phrase.",
+        ]
     return "\n".join(lines)

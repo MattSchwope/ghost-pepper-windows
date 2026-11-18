@@ -93,5 +93,18 @@ Check("json escapes", JsonValue(json, "mic"), 'Mic "USB" ' Chr(0xE9) '\x')
 Check("json path", JsonValue(json, "assets_dir"), "C:/GP/assets")
 Check("json missing key", JsonValue(json, "nope", "fallback"), "fallback")
 
+; Add-word hotkey label and form encoding
+Check("label ctrl alt d", HotkeyLabel("^!d"), "Ctrl+Alt+D")
+Check("label win shift F9", HotkeyLabel("#+F9"), "Win+Shift+F9")
+Check("label with prefixes", HotkeyLabel("~*^d"), "Ctrl+D")
+Check("encode plain", UriEncode("Kavaliro"), "Kavaliro")
+Check("encode reserved", UriEncode("TS/SCI & CI Poly+1"), "TS%2FSCI%20%26%20CI%20Poly%2B1")
+Check("encode utf-8", UriEncode("Zoë"), "Zo%C3%AB")
+
+; Line breaks on the clipboard
+Check("clipboard: LF becomes CRLF", ClipboardText("Matt`nKavaliro`n`nCall me"), "Matt`r`nKavaliro`r`n`r`nCall me")
+Check("clipboard: CRLF stays as it is", ClipboardText("a`r`nb"), "a`r`nb")
+Check("clipboard: one line untouched", ClipboardText("one line"), "one line")
+
 FileAppend(Failures ? Failures " failed`n" : "ALL PASSED`n", "*")
 ExitApp(Failures ? 1 : 0)
