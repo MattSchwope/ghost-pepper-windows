@@ -5,9 +5,11 @@ Endpoints:
   POST /start    open the mic and start recording (JSON)
   POST /stop     stop, transcribe; the body is the text to paste (text/plain), status in X-Dictation-* headers
   POST /cancel   drop the recording, or the transcription in flight (JSON)
-  POST /pasted   the script reports its release-to-paste timing; starts auto-learn (JSON)
+  POST /pasted   the script reports its release-to-paste timing and the program it pasted into; starts auto-learn (JSON)
   POST /learned  fixes auto-learn saved since the last call, one "wrong -> Right" per line (text/plain)
   POST /dictionary/add  the add-word hotkey: word=<selected text> (JSON)
+  POST /recent   the last 10 dictations, newest first, for the recent window and paste_last (text/plain,
+                 see recent.render_recent). A POST, so it needs the client header: a web page cannot read it.
 
 POSTs must carry the X-GPW-Client header and no Origin header, so a web page
 cannot start the mic: browsers add Origin to cross-site requests and cannot add
@@ -25,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .mic import MicError
+from .recent import render_recent
 from .service import DictationService, ServiceBusy
 
 logger = logging.getLogger(__name__)
@@ -105,7 +108,7 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                     dictation_id = _int(form, "id")
                     ok = service.pasted(
                         dictation_id, _int(form, "release_to_paste_ms"), _int(form, "paste_ms"),
-                        None if restored == "" else restored == "1",
+                        None if restored == "" else restored == "1", app=form.get("app", [""])[0],
                     )
                     learn_ms = service.watch_for_corrections(dictation_id) if ok else 0
                     self._json(200, {"ok": ok, "learn_ms": learn_ms})
@@ -114,6 +117,9 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                     self._send(200, "\n".join(lines).encode("utf-8"), "text/plain; charset=utf-8")
                 elif path == "/dictionary/add":
                     self._add_word(form.get("word", [""])[0])
+                elif path == "/recent":
+                    body = render_recent(service.recent.newest_first()).encode("utf-8")
+                    self._send(200, body, "text/plain; charset=utf-8")
                 else:
                     self._json(404, {"ok": False, "error": "Not found."})
             except Exception as exc:

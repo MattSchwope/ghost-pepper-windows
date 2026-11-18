@@ -36,6 +36,8 @@ hotkeys:
   add_word: "^!d"          # Ctrl+Alt+D: add the selected word to the dictionary ("" turns it off).
                            # AutoHotkey syntax: ^ Ctrl, ! Alt, + Shift, # Win. Use the left Ctrl;
                            # the right one is the dictate key.
+  recent: "^!h"            # Ctrl+Alt+H: the last 10 dictations with copy buttons ("" turns it off)
+  paste_last: "^!l"        # Ctrl+Alt+L: paste the latest dictation again ("" turns it off)
   tap_ms: 250              # a press shorter than this counts as a tap
   double_tap_ms: 400       # the most time allowed between the two taps
 

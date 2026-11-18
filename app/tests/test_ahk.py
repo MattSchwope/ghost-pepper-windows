@@ -87,3 +87,48 @@ def test_hotkey_http_client_against_the_real_server(tmp_path):
         "closed port: error",
     ]
     assert json.loads(service.latency_log.read_text(encoding="utf-8").splitlines()[0])["release_to_paste"] == 1.234
+
+
+def test_recent_window_helpers():
+    result = run_ahk(str(REPO_ROOT / "app" / "tests" / "ahk" / "test_recent_logic.ahk"))
+    assert result.returncode == 0 and "ALL PASSED" in result.stdout, result.stdout + result.stderr
+
+
+def test_copy_button_gets_the_exact_pasted_text_through_the_real_server(tmp_path):
+    """Phase 2c: what the copy button puts on the clipboard is exactly what was pasted, line breaks included."""
+    import threading
+    from datetime import datetime
+
+    from gpw.recent import RecentDictation
+    from gpw.server import make_server
+    from gpw.service import DictationService
+    from test_service import FakeEngine, FakeMic, make_config
+
+    pasted = "Dear Sam,\n\nSee you at 9 – “café”.\tTab and C:\\new\\path"
+    service = DictationService(
+        make_config(tmp_path), FakeEngine(text=pasted), FakeMic(), now=lambda: datetime(2026, 11, 18, 9, 15, 4)
+    )
+    service.recent.add(RecentDictation(datetime(2026, 11, 18, 8, 30), "Matt\nTitle", label="[snippet: signature]"))
+    service.start()
+    result = service.stop()
+    assert result.text == pasted
+    service.pasted(result.dictation_id, 900, 20, True, app="OUTLOOK.EXE")
+    server = make_server(service, 0)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    try:
+        out = subprocess.run(
+            [str(AHK), "/ErrorStdOut", str(REPO_ROOT / "app" / "tests" / "ahk" / "test_recent_client.ahk"),
+             f"http://127.0.0.1:{server.server_port}"],
+            capture_output=True, timeout=30,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        service.close()
+    assert out.returncode == 0, out.stdout.decode("utf-8", "replace") + out.stderr.decode("utf-8", "replace")
+    rows = [record.split("\x1f") for record in out.stdout.decode("utf-8").split("\x1e")[:-1]]
+    assert rows == [
+        ["09:15", "OUTLOOK", "Dear Sam,\nSee you at 9 – “café”.\tTab and C:\\new\\path",
+         pasted.replace("\n", "\r\n")],
+        ["08:30", "", "[snippet: signature]", "Matt\r\nTitle"],
+    ]

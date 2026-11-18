@@ -57,7 +57,7 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 | `gpw transcribe-file clip.m4a` | Prints the transcript from GPT-Transcribe. Long files are cut at pauses into ~10 minute chunks. `--prep off\|light\|strong`, `--context "one line on the topic"` |
 | `gpw eval --prep off,light,strong` | Runs every clip in `eval/clips/` at each prep level and prints a WER table. Hypotheses are cached in `eval/results/`; `--fresh` redoes them |
 | `gpw record-once --duration 8` | Beeps, records for that many seconds, beeps again, then transcribes and copies the text. Uses the Windows default mic unless `recording.input_device` names another. Kept for quick mic checks; daily dictation uses hold-to-talk below |
-| `gpw serve` | The always-running dictation service the hotkey script talks to, on 127.0.0.1 only. `--dry-run` pastes a fixed sentence instead of calling OpenAI. Normally started for you by the hotkey script |
+| `gpw serve` | The always-running dictation service the hotkey script talks to, on 127.0.0.1 only. It keeps the last 10 dictations in memory for the recent-dictations window. `--dry-run` pastes a fixed sentence instead of calling OpenAI. Normally started for you by the hotkey script |
 | `gpw latency` | Release-to-paste report from the dictation timing log: median, 90th percentile, and where the time goes. `--last 50` for the most recent 50 |
 | `gpw dictionary` | Shows where the personal dictionary is, how many terms and fixes it has, how many terms go out with each dictation, and any error in the file. Creates a starter file if there is none |
 | `gpw snippets` | Shows where the snippets file is, the phrases you can say, and any error in the file. Creates a starter file if there is none |
@@ -82,8 +82,10 @@ A green dot appears in the system tray, and the script starts the Python service
 | Right Ctrl plus another key (Ctrl+C) | Works as normal; the recording is dropped quietly |
 | Select a word, press Ctrl+Alt+D (left Ctrl) | Adds it to the personal dictionary |
 | Hold Right Ctrl, say "insert signature", let go | Pastes that snippet |
+| Ctrl+Alt+H, or left-click the tray dot | Opens the last 10 dictations, newest first, with a copy button on each |
+| Ctrl+Alt+L | Pastes the latest dictation again, into whatever has focus now. Your clipboard is put back afterwards |
 
-The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Right-click it for today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
+The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Left-click it for recent dictations. Right-click it for Recent dictations, today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
 
 - Clips with no speech are skipped: no API call and no paste.
 - Every dictation is appended to `C:\GhostPepperWindows\notes\dictation\YYYY-MM-DD.md` (`dictation.daily_log`).
@@ -91,6 +93,18 @@ The tray dot is green when ready, red while listening, pink in hands-free and am
 - To try the keys and paste without spending anything: `.\app\scripts\start_dictation.ps1 -DryRun`.
 - Keys, timings, sounds and the silence threshold are in the `hotkeys:` and `dictation:` blocks of the config.
 - Windows blocks pasting into apps that run as administrator unless AutoHotkey runs as administrator too.
+
+### Recent dictations
+
+For a dictation that pasted into the wrong window, or nowhere.
+
+- Press Ctrl+Alt+H or left-click the tray dot. A small window opens near the tray with the last 10 dictations, newest first. Each row shows the time, the program it was pasted into and the first two lines. Hover a row to see the whole text.
+- Click a row's copy button (two overlapping rectangles) to put its exact text on the clipboard, line breaks included. The row shows "Copied" for a moment. Paste it wherever you like with Ctrl+V.
+- Press 1 to 9, or 0 for the tenth row, to copy that row and close the window. Esc or a click anywhere else closes it. Ctrl+Alt+H again closes it too.
+- Snippets show as `[snippet: <name>]` and copy the snippet's text. Cancelled and silent clips are not listed.
+- Ctrl+Alt+L pastes the latest one again without opening the window, which covers the usual case: the wrong window a moment ago.
+- The list lives in the service's memory, not on disk. After a restart it refills from today's daily log when `dictation.daily_log` is on, and starts empty when it is off. Dictations from before a restart show no program name.
+- Change the keys with `hotkeys.recent` and `hotkeys.paste_last`, or set either to `""` to turn it off. The service refuses to start if two settings in `hotkeys:` name the same key.
 
 ### Personal dictionary and cleanup
 

@@ -86,6 +86,14 @@ def spoken_name(transcript: str) -> str | None:
     return " ".join(words[1:])
 
 
+def snippet_named(name: str, snippets: dict[str, Snippet]) -> Snippet | None:
+    """The snippet with this name as written in snippets.yaml, or one that sounds the same."""
+    for snippet in snippets.values():
+        if snippet.name == name:
+            return snippet
+    return snippets.get(" ".join(_words(name)))
+
+
 def match_snippet(transcript: str, snippets: dict[str, Snippet]) -> Snippet | None:
     name = spoken_name(transcript)
     return snippets.get(name) if name else None
