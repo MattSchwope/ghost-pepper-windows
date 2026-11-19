@@ -8,6 +8,8 @@ Endpoints:
   POST /pasted   the script reports its release-to-paste timing and the program it pasted into; starts auto-learn (JSON)
   POST /learned  fixes auto-learn saved since the last call, one "wrong -> Right" per line (text/plain)
   POST /dictionary/add  the add-word hotkey: word=<selected text> (JSON)
+  POST /voice-edit  the voice-edit keys were released: selection=<copied text>. Like /stop, but the body is
+                 the selection rewritten with the spoken instruction (Phase 3)
   POST /recent   the last 10 dictations, newest first, for the recent window and paste_last (text/plain,
                  see recent.render_recent). A POST, so it needs the client header: a web page cannot read it.
 
@@ -28,14 +30,14 @@ from urllib.parse import parse_qs, urlsplit
 
 from .mic import MicError
 from .recent import render_recent
-from .service import DictationService, ServiceBusy
+from .service import DictationService, ServiceBusy, StopResult
 
 logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
 CLIENT_HEADER = "X-GPW-Client"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
-MAX_BODY = 64 * 1024
+MAX_BODY = 1024 * 1024  # room for a voice-edit selection of a few thousand words, percent-encoded
 
 
 def _int(form: dict[str, list[str]], key: str, default: int = 0) -> int:
@@ -117,6 +119,8 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                     self._send(200, "\n".join(lines).encode("utf-8"), "text/plain; charset=utf-8")
                 elif path == "/dictionary/add":
                     self._add_word(form.get("word", [""])[0])
+                elif path == "/voice-edit":
+                    self._reply(service.voice_edit(form.get("selection", [""])[0]))
                 elif path == "/recent":
                     body = render_recent(service.recent.newest_first()).encode("utf-8")
                     self._send(200, body, "text/plain; charset=utf-8")
@@ -143,7 +147,9 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                 self._json(400, {"ok": False, "error": str(exc)})
 
         def _stop(self, mode: str) -> None:
-            result = service.stop("".join(ch for ch in mode if ch.isalnum() or ch == "_")[:20] or "hold")
+            self._reply(service.stop("".join(ch for ch in mode if ch.isalnum() or ch == "_")[:20] or "hold"))
+
+        def _reply(self, result: StopResult) -> None:
             body = result.text if result.status == "ok" else result.message
             headers = {"X-Dictation-Id": str(result.dictation_id), "X-Dictation-Status": result.status}
             if result.note:

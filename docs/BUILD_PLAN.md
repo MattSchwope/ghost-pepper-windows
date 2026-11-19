@@ -266,6 +266,14 @@ Built notes: the service answers `POST /recent` (it needs the client header, so 
 **Done when**
 - [ ] It works on selections up to about 2,000 words.
 - [ ] With nothing selected, it shows a tooltip and changes nothing.
+- [x] A 2,000-word selection with accents, curly quotes and Windows line breaks goes through the script's own form encoding and the real service to the text model unchanged, and the rewrite comes back ready to paste (test). `test_voice_edit_through_the_real_server` runs the script's HTTP client against a real service with a fake text model.
+- [x] An empty selection is refused by both the script and the service, before any API call (test).
+- [x] An empty instruction, a failed model call, an empty or unchanged answer, or Esc leaves the selection alone; nothing is pasted (tests in `app/tests/test_voice_edit.py`).
+- [x] Dictionary spellings survive the rewrite, and preambles, quotes and code fences around the answer are removed (tests).
+
+How to check: the tests run with `pytest`. The first two boxes need the real app with the real model: a 2,000-word selection in Word or Outlook, and the hotkey with nothing selected; see the Phase 3 checklist in the PR.
+
+Built notes: the hotkey is `hotkeys.voice_edit_hold` (default `RCtrl+RShift`, the dictate key plus one more). Pressing the second key while the dictate key is held turns the recording into a voice edit, so the mic is already open. The script copies the selection with Ctrl+C at that moment and posts it to `POST /voice-edit` at release. The service transcribes the instruction like a dictation, then calls `openai.text_model` with `app/prompts/voice_edit.md`, `max_output_tokens` and a timeout from the `voice_edit:` block. An answer cut off at the token limit is thrown away. Voice edits are listed in recent dictations as `[voice edit]`, are left out of the `gpw latency` dictation report, and are not written to the daily log.
 
 ## Phase 4: Long recordings
 

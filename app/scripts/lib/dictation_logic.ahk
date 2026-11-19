@@ -3,13 +3,15 @@
 ; app/tests/ahk/test_dictation_logic.ahk can test them without touching the keyboard.
 
 ; One step of the dictation key state machine. Returns [newState, action].
-;   States:  idle, held, tapped, held2, handsfree, handsfree_down, busy
-;   Events:  down, up, tap_timeout, max_timeout, cancel, done
-;   Actions: start, stop, cancel, cancel_quiet, abort, arm_tap, disarm_tap, handsfree, none
+;   States:  idle, held, tapped, held2, handsfree, handsfree_down, edit, busy
+;   Events:  down, up, edit, edit_up, tap_timeout, max_timeout, cancel, done
+;   Actions: start, stop, cancel, cancel_quiet, abort, arm_tap, disarm_tap, handsfree, edit, none
 ; Hold the key to talk and release to paste. Tap twice for hands-free, then tap once to stop.
 ; Pressing another key with the dictate key (a shortcut such as RCtrl+C) cancels quietly.
+; Voice edit (Phase 3): the voice-edit key ("edit", RShift) going down while the dictate key is
+; held turns the recording into a voice edit. Letting go of either key stops it.
 NextStep(state, event, heldMs := 0, combo := false, tapMs := 250) {
-    static recording := Map("held", 1, "tapped", 1, "held2", 1, "handsfree", 1, "handsfree_down", 1)
+    static recording := Map("held", 1, "tapped", 1, "held2", 1, "handsfree", 1, "handsfree_down", 1, "edit", 1)
     if (event = "cancel") {
         if recording.Has(state)
             return ["idle", "cancel"]
@@ -22,6 +24,8 @@ NextStep(state, event, heldMs := 0, combo := false, tapMs := 250) {
             if (event = "down")
                 return ["held", "start"]
         case "held", "held2":
+            if (event = "edit")
+                return ["edit", "edit"]
             if (event = "up") {
                 if combo
                     return ["idle", "cancel_quiet"]
@@ -40,11 +44,39 @@ NextStep(state, event, heldMs := 0, combo := false, tapMs := 250) {
         case "handsfree_down":
             if (event = "up")
                 return ["busy", "stop"]
+        case "edit":
+            if (event = "up" || event = "edit_up")
+                return combo ? ["idle", "cancel_quiet"] : ["busy", "stop"]
         case "busy":
             if (event = "done")
                 return ["idle", "none"]
     }
     return [state, "none"]
+}
+
+; True if the key pressed last before a release is not one of `keys`: the user pressed a shortcut,
+; such as RCtrl+C, rather than holding the dictate or voice-edit keys alone.
+IsCombo(prior, keys*) {
+    for key in keys
+        if (key != "" && prior = key)
+            return false
+    return true
+}
+
+; Words in the text: runs of non-space characters, as Python's str.split() counts them.
+WordCount(text) {
+    RegExReplace(text, "\S+", "", &count)
+    return count
+}
+
+; Why a voice edit cannot use this selection, for the tooltip; "" when it can.
+VoiceEditProblem(selection, maxWords) {
+    if (Trim(selection, " `t`r`n") = "")
+        return "Select text first, then hold the voice-edit keys and say the change."
+    words := WordCount(selection)
+    if (words > maxWords)
+        return "The selection is " words " words. Voice edit takes up to " maxWords ", so nothing was changed."
+    return ""
 }
 
 ; Modifier keys pass through ("~") so RCtrl+C still copies; other keys are swallowed.
