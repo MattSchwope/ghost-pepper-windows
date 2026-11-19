@@ -8,6 +8,7 @@
 ; this script owns the keys, the cue sounds, the tray icon and the paste (ADR-003).
 ;   Hold RCtrl, talk, release: the text is pasted where the cursor is.
 ;   Double-tap RCtrl: hands-free. Tap RCtrl once more to stop and paste.
+;   Select text, hold RCtrl+RShift, say the change ("make this shorter"), let go: the selection is rewritten.
 ;   Esc while recording or transcribing: cancel.
 ;   Ctrl+Alt+D with a word selected: add it to the personal dictionary.
 ;   Say "insert signature" as a whole dictation: the service answers with that snippet's text.
@@ -35,6 +36,10 @@ DownTick := 0
 ReleaseTick := 0
 StopMode := "hold"
 Aborted := false
+EditKey := ""  ; voice edit (Phase 3): held with the dictate key, such as RShift; "" when off
+EditKeyName := ""
+EditMaxWords := 3000
+EditSelection := ""  ; copied when the voice edit starts; sent at release; never logged
 StartedService := false
 ServicePid := 0
 DictateKey := "RCtrl"
@@ -149,6 +154,9 @@ LoadSettings(health) {
     AssetsDir := StrReplace(JsonValue(health, "assets_dir"), "/", "\")
     NotesDir := StrReplace(JsonValue(health, "notes_dir"), "/", "\")
     LogsDir := StrReplace(JsonValue(health, "logs_dir"), "/", "\")
+    EditKey := JsonValue(health, "voice_edit_key", "")
+    EditKeyName := EditKey != "" ? GetKeyName(EditKey) : ""
+    EditMaxWords := Integer(JsonValue(health, "voice_edit_max_words", 3000))
 }
 
 Http(method, path, body := "", timeoutMs := 5000) => GpwHttp(BaseUrl, method, path, body, timeoutMs)
@@ -161,6 +169,11 @@ BindHotkeys() {
     prefix := HotkeyPrefix(DictateKey)
     Hotkey(prefix DictateKey, OnDictateDown)
     Hotkey(prefix DictateKey " Up", OnDictateUp)
+    if (EditKey != "") {
+        HotIf(EditKeyLive)  ; only with the dictate key held, so the key works as usual otherwise
+        Hotkey(HotkeyPrefix(EditKey) EditKey, OnEditDown)
+        Hotkey(HotkeyPrefix(EditKey) EditKey " Up", OnEditUp)
+    }
     HotIf(IsActive)
     Hotkey("*" CancelKey, OnCancelKey)
     HotIf()
@@ -180,6 +193,7 @@ BindHotkeys() {
 }
 
 IsActive(*) => State != "idle"
+EditKeyLive(*) => State = "edit" || GetKeyState(DictateKeyName, "P")
 
 OnDictateDown(*) {
     global
@@ -188,13 +202,18 @@ OnDictateDown(*) {
     KeyDown := true
     DownTick := A_TickCount
     Dispatch("down")
+    if (EditKeyName != "" && GetKeyState(EditKeyName, "P"))
+        Dispatch("edit")  ; the voice-edit key went down first: RShift, then RCtrl
 }
 
 OnDictateUp(*) {
     global
     KeyDown := false
-    Dispatch("up", A_TickCount - DownTick, A_PriorKey != DictateKeyName)
+    Dispatch("up", A_TickCount - DownTick, IsCombo(A_PriorKey, DictateKeyName, EditKeyName))
 }
+
+OnEditDown(*) => Dispatch("edit")
+OnEditUp(*) => Dispatch("edit_up", 0, IsCombo(A_PriorKey, DictateKeyName, EditKeyName))
 
 OnCancelKey(*) => Dispatch("cancel")
 OnTapTimeout() => Dispatch("tap_timeout")
@@ -215,7 +234,7 @@ Dispatch(event, heldMs := 0, combo := false) {
             SetTimer(OnTapTimeout, 0)
             SetIcon("busy")
             SetTimer(StopCue, -120)  ; after the mic has closed, so the beep is not recorded
-            SetTimer(FinishDictation, -1)
+            SetTimer((before = "edit") ? FinishVoiceEdit : FinishDictation, -1)
         case "cancel", "cancel_quiet":
             SetTimer(OnMaxTimeout, 0)
             SetTimer(OnTapTimeout, 0)
@@ -235,6 +254,8 @@ Dispatch(event, heldMs := 0, combo := false) {
             SetTimer(OnTapTimeout, -DoubleTapMs)
         case "disarm_tap":
             SetTimer(OnTapTimeout, 0)
+        case "edit":
+            BeginVoiceEdit()
         case "handsfree":
             PlayCue("handsfree")
             SetIcon("handsfree")
@@ -271,11 +292,12 @@ RestartService() {
         LoadSettings(health)
 }
 
-FinishDictation() {
+; Stop and paste. A voice edit uses the same path with /voice-edit and the selection.
+FinishDictation(path := "/stop", body := "") {
     global
     Aborted := false
     r := ""
-    try r := GpwHttpAbortable(BaseUrl, "/stop", "mode=" StopMode, 900000, IsAborted)
+    try r := GpwHttpAbortable(BaseUrl, path, body != "" ? body : "mode=" StopMode, 900000, IsAborted)
     catch {
         PlayCue("error")
         ShowTip("Lost contact with the dictation service.", 4000)
@@ -295,6 +317,37 @@ FinishDictation() {
     Dispatch("done")
     if (State = "idle")
         SetIcon("idle")
+}
+
+; -- voice edit (Phase 3) --
+
+; The voice-edit key went down with the dictate key held, and the mic is already recording: copy the
+; selection now. With nothing selected, or too much, stop recording and change nothing.
+BeginVoiceEdit() {
+    global EditSelection, State
+    Critical("On")  ; a key release waits until the selection is in hand; ends with this thread
+    EditSelection := CopySelection(1)
+    problem := VoiceEditProblem(EditSelection, EditMaxWords)
+    if (problem = "") {
+        ShowTip("Voice edit: say the change, then let go.", 1500)
+        return
+    }
+    EditSelection := ""
+    State := "idle"
+    SetTimer(OnMaxTimeout, 0)
+    try Http("POST", "/cancel")
+    SetIcon("idle")
+    PlayCue("empty")
+    ShowTip(problem, 3000)
+}
+
+; Send the selection with the recorded instruction. On "ok" the answer is pasted over the selection,
+; which is still selected; anything else shows a tooltip and leaves it alone.
+FinishVoiceEdit() {
+    global EditSelection
+    body := "selection=" UriEncode(EditSelection)
+    EditSelection := ""
+    FinishDictation("/voice-edit", body)
 }
 
 ; -- paste --
@@ -355,12 +408,7 @@ OnAddWord(*) {
         return
     for mod in ["Ctrl", "Alt", "Shift", "LWin", "RWin"]
         KeyWait(mod, "T1")  ; let go of the hotkey first, so Ctrl+C is not Ctrl+Alt+C
-    saved := ClipboardAll()
-    A_Clipboard := ""
-    Send("^c")
-    copied := ClipWait(0.6) ? A_Clipboard : ""
-    RestoreClipboard(saved)
-    word := Trim(copied, " `t`r`n")
+    word := Trim(CopySelection(), " `t`r`n")
     if (word = "") {
         ShowTip("Select a word first, then press " HotkeyLabel(AddWordKey) ".", 2500)
         return
@@ -379,6 +427,17 @@ OnAddWord(*) {
     if !ok
         PlayCue("error")
     ShowTip(JsonValue(r.body, ok ? "message" : "error", "Could not add it."), ok ? 2000 : 4000)
+}
+
+; Copy the selection with Ctrl+C, then put the clipboard back. "" when nothing was selected.
+; Send releases a held Shift for the copy, so RCtrl+RShift still sends Ctrl+C.
+CopySelection(waitSeconds := 0.6) {
+    saved := ClipboardAll()
+    A_Clipboard := ""
+    Send("^c")
+    copied := ClipWait(waitSeconds) ? A_Clipboard : ""
+    RestoreClipboard(saved)
+    return copied
 }
 
 ; Put the saved clipboard back and check it byte for byte.

@@ -33,6 +33,8 @@ from .markdown_store import append_daily_dictation
 from .mic import MicCapture, MicError, MicTimeout
 from .recent import RecentDictation, RecentDictations, from_daily_log, snippet_label
 from .snippets import Snippet, SnippetStore, match_snippet, snippet_named, spoken_name
+from .voice_edit import LABEL as VOICE_EDIT_LABEL
+from .voice_edit import VoiceEditor, selection_problem, word_count
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,8 @@ SKIP_MESSAGES = {
     "quiet": "Didn't hear anything. Nothing was sent or pasted.",
     "too_little_speech": "Too short to be speech. Nothing was sent or pasted.",
     "empty_transcript": "OpenAI heard no words. Nothing was pasted.",
+    "empty_instruction": "Didn't catch an instruction. The selection was not changed.",
+    "unchanged": "The text model left the selection as it was. Nothing was pasted.",
 }
 
 
@@ -74,7 +78,7 @@ def _r(seconds: float) -> float:
     return round(seconds, 3)
 
 
-def friendly_error(exc: Exception) -> str:
+def friendly_error(exc: Exception, action: str = "Transcription") -> str:
     """A short reason for the tooltip. Exception text is not shown: it can echo request details."""
     name = type(exc).__name__
     if name in ("APIConnectionError", "APITimeoutError", "ConnectError", "TimeoutException"):
@@ -83,7 +87,7 @@ def friendly_error(exc: Exception) -> str:
         return "OpenAI rejected the API key. Check OPENAI_API_KEY in .env."
     if name == "RateLimitError":
         return "OpenAI rate limit or quota reached."
-    return f"Transcription failed ({name})."
+    return f"{action} failed ({name})."
 
 
 class DictationService:
@@ -127,6 +131,8 @@ class DictationService:
         self._watchdog: threading.Timer | None = None
         self._last_api = 0.0
         self._last_refresh = time.monotonic()
+        self.editor: VoiceEditor | Any = None  # Phase 3 voice edit; set by cli.run_serve (voice_edit.build_editor)
+        self._edits: dict[int, str] = {}  # the selection for a voice edit in flight; never logged
 
     # -- lifecycle --
     def open(self) -> None:
@@ -190,6 +196,9 @@ class DictationService:
             "auto_learn": self.learner is not None and self.learner.available,
             "tap_ms": h.tap_ms,
             "double_tap_ms": h.double_tap_ms,
+            "voice_edit_key": h.voice_edit_key if self.editor is not None else "",
+            "voice_edit_hold": h.voice_edit_hold,
+            "voice_edit_max_words": self.config.voice_edit.max_words,
             "max_seconds": int(d.max_seconds),
             "sounds": d.sounds,
             "paste_restore_ms": d.paste_restore_ms,
@@ -382,6 +391,8 @@ class DictationService:
         transcribed = time.perf_counter()
         self._last_api = time.monotonic()
         record.update(api=_r(timed.api_seconds), server=timed.server_seconds)
+        if mode == "voice_edit":
+            return self._finish_voice_edit(dictation_id, record, timed.text, raw, rate, released)
 
         raw_text = timed.text
         c = self.config.cleanup
@@ -452,6 +463,74 @@ class DictationService:
             dictation_id, reason, record["audio"], record["peak_dbfs"], record["speech_ms"],
         )
         return StopResult("skipped", dictation_id, message=SKIP_MESSAGES[reason])
+
+    # -- voice edit (Phase 3) --
+    def voice_edit(self, selection: str) -> StopResult:
+        """The voice-edit keys were released: rewrite `selection` with the instruction just recorded.
+
+        Status "ok" carries the text to paste over the selection. Anything else leaves the selection alone.
+        """
+        selection = selection.replace("\r\n", "\n")
+        problem = selection_problem(selection, self.config.voice_edit.max_words)
+        if problem or self.editor is None:
+            outcome = self.cancel()
+            logger.info(
+                "Voice edit id=%s not sent: %s (recording %s)", self._id,
+                "voice edit is off" if self.editor is None else "no selection" if not selection.strip()
+                else f"selection of {word_count(selection)} words is over the limit", outcome,
+            )
+            return StopResult("skipped", self._id, message=problem or "Voice edit is off. Nothing was changed.")
+        with self._lock:
+            if self._state == "recording":
+                self._edits = {self._id: selection}
+        return self.stop("voice_edit")
+
+    def _finish_voice_edit(
+        self, dictation_id: int, record: dict[str, Any], heard: str, raw: np.ndarray, rate: int, released: float
+    ) -> StopResult:
+        with self._lock:
+            selection = self._edits.pop(dictation_id, "")
+        words = self.dictionary.current() if self.dictionary else None
+        terms, replace = (words.terms, words.replace) if words else ([], {})
+        instruction = apply_replacements(heard, replace).strip()
+        record.update(selection_words=word_count(selection))
+        if not any(ch.isalnum() for ch in instruction):
+            return self._skipped(dictation_id, record, "empty_instruction")
+        started = time.perf_counter()
+        try:
+            text = self.editor.rewrite(selection, instruction, terms, replace)
+        except Exception as exc:
+            record.update(status="error", error=type(exc).__name__, edit=_r(time.perf_counter() - started))
+            logger.error(
+                "Voice edit id=%s text model failed: %s status=%s after=%.2fs; the selection was left alone",
+                dictation_id, type(exc).__name__, getattr(exc, "status_code", "-"), record["edit"],
+            )
+            append_record(self.latency_log, record)
+            return StopResult("error", dictation_id, message=friendly_error(exc, "Voice edit") + " The selection was not changed.")
+        record["edit"] = _r(time.perf_counter() - started)
+        if text == selection:
+            return self._skipped(dictation_id, record, "unchanged")
+        record.update(status="ready", chars=len(text), service=_r(time.perf_counter() - released))
+        logger.info(
+            "Voice edit id=%s ready audio=%.1fs sent=%.1fs record_end=%.3fs prep=%.3fs encode=%.3fs api=%.2fs "
+            "edit=%.2fs service=%.2fs words_in=%s chars_out=%s",
+            dictation_id, record["audio"], record["sent"], record["record_end"], record["prep"], record["encode"],
+            record["api"], record["edit"], record["service"], record["selection_words"], record["chars"],
+        )
+        if self.config.debug_log_transcripts:
+            logger.info("Voice edit id=%s instruction: %s", dictation_id, instruction)
+            logger.info("Voice edit id=%s result: %s", dictation_id, text)
+        with self._lock:
+            if dictation_id in self._cancelled:
+                return StopResult("cancelled", dictation_id)  # Esc while the text model worked: no paste
+            self._pending[dictation_id] = record
+            while len(self._pending) > PENDING_LIMIT:
+                self._pending.popitem(last=False)
+            when = datetime.fromisoformat(record["ts"])
+            self.recent.add(RecentDictation(when, text, label=VOICE_EDIT_LABEL, dictation_id=dictation_id))
+        if not self.config.delete_audio_after_success:
+            self._post.submit(self._save_audio, dictation_id, raw, rate)
+        return StopResult("ok", dictation_id, text=text)
 
     # -- after the paste --
     def pasted(

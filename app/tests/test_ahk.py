@@ -132,3 +132,51 @@ def test_copy_button_gets_the_exact_pasted_text_through_the_real_server(tmp_path
          pasted.replace("\n", "\r\n")],
         ["08:30", "", "[snippet: signature]", "Matt\r\nTitle"],
     ]
+
+
+def test_voice_edit_through_the_real_server(tmp_path):
+    """Phase 3: a 2,000-word selection with accents and line breaks goes out with the script's own
+    form encoding, reaches the text model exactly, and the rewrite comes back ready to paste."""
+    import threading
+
+    from gpw.server import make_server
+    from gpw.service import DictationService
+    from test_service import FakeEngine, FakeMic, make_config
+
+    paragraph = " ".join(f"café{i} “naïve” – ✓" for i in range(25))  # 100 words
+    selection = "\r\n\r\n".join(paragraph for _ in range(20))  # 2,000 words, as copied on Windows
+    seen = []
+
+    class RecordingEditor:
+        def rewrite(self, selection, instruction, terms=(), replace=None):
+            seen.append((selection, instruction))
+            return selection.replace("café0 ", "Café zero ")
+
+    service = DictationService(make_config(tmp_path), FakeEngine(text="Capitalize the first word"), FakeMic())
+    service.editor = RecordingEditor()
+    server = make_server(service, 0)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    selection_file, pasted_file = tmp_path / "selection.txt", tmp_path / "pasted.txt"
+    selection_file.write_bytes(selection.encode("utf-8"))
+    try:
+        result = subprocess.run(
+            [str(AHK), "/ErrorStdOut", str(REPO_ROOT / "app" / "tests" / "ahk" / "test_voice_edit_client.ahk"),
+             f"http://127.0.0.1:{server.server_port}", str(selection_file), str(pasted_file)],
+            capture_output=True, timeout=60,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        service.close()
+    out = result.stdout.decode("utf-8")
+    assert result.returncode == 0, out + result.stderr.decode("utf-8", "replace")
+    expected = selection.replace("\r\n", "\n")
+    assert seen == [(expected, "Capitalize the first word")]
+    assert pasted_file.read_bytes().decode("utf-8") == expected.replace("café0 ", "Café zero ").replace("\n", "\r\n")
+    assert out.splitlines() == [
+        "health RShift 3000",
+        "words 2000 problem []",
+        "edit 200 ok 1",
+        "empty problem [Select text first, then hold the voice-edit keys and say the change.]",
+        "empty 200 skipped Select text first, then hold the voice-edit keys and say the change.",
+    ]

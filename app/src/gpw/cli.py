@@ -263,6 +263,9 @@ def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
 
     service = build_service(config, dry_run)
     try:
+        from .voice_edit import build_editor
+
+        service.editor = build_editor(config, dry_run)  # Phase 3; None when hotkeys.voice_edit_hold is off
         service.open()
         server = make_server(service, port or config.service_port)
     except Exception:

@@ -61,6 +61,7 @@ def is_dry_run(record: dict[str, Any]) -> bool:
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     dry_runs = sum(1 for r in records if is_dry_run(r))
     records = [r for r in records if not is_dry_run(r)]
+    records = [r for r in records if r.get("mode") != "voice_edit"]  # Phase 3: those also wait on the text model
     pasted = [r for r in records if r.get("status") == "pasted" and isinstance(r.get("release_to_paste"), (int, float))]
     low, high = TEN_SECOND_CLIPS
     ten = [r for r in pasted if low <= float(r.get("audio", 0)) <= high]

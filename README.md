@@ -82,6 +82,7 @@ A green dot appears in the system tray, and the script starts the Python service
 | Right Ctrl plus another key (Ctrl+C) | Works as normal; the recording is dropped quietly |
 | Select a word, press Ctrl+Alt+D (left Ctrl) | Adds it to the personal dictionary |
 | Hold Right Ctrl, say "insert signature", let go | Pastes that snippet |
+| Select text, hold Right Ctrl + Right Shift, say the change, let go | Voice edit: the selection is rewritten ("make this shorter"). Ctrl+Z undoes it in most apps |
 | Ctrl+Alt+H, or left-click the tray dot | Opens the last 10 dictations, newest first, with a copy button on each |
 | Ctrl+Alt+L | Pastes the latest dictation again, into whatever has focus now. Your clipboard is put back afterwards |
 
@@ -93,6 +94,26 @@ The tray dot is green when ready, red while listening, pink in hands-free and am
 - To try the keys and paste without spending anything: `.\app\scripts\start_dictation.ps1 -DryRun`.
 - Keys, timings, sounds and the silence threshold are in the `hotkeys:` and `dictation:` blocks of the config.
 - Windows blocks pasting into apps that run as administrator unless AutoHotkey runs as administrator too.
+
+### Voice edit
+
+Rewrite selected text by saying what to change.
+
+1. Select the text in any app.
+2. Hold Right Ctrl and Right Shift together (either one first). The start beep plays and a tooltip says "Voice edit".
+3. Say the change: "make this shorter", "fix grammar only", "turn this into bullets", "make it more formal".
+4. Let go. After a second or two the selection is replaced with the rewrite. Ctrl+Z undoes it in most apps.
+
+- Leave the text selected until the rewrite lands; clicking elsewhere moves where it pastes.
+- With nothing selected you get a "Select text first" tooltip and nothing changes. If no instruction is heard, or OpenAI fails, a tooltip says why and the selection stays as it was. An error message is never pasted.
+- It keeps the text's language and formatting unless you ask otherwise, and keeps dictionary spellings (`terms:` and the right side of `replace:`). Your spoken instruction gets the same dictionary hints and fixes as dictation.
+- Selections up to 3,000 words are sent (`voice_edit.max_words`); longer ones get a tooltip instead.
+- Esc while it works cancels it. Pressing another key with Right Ctrl + Right Shift (such as an arrow) drops it quietly.
+- The rewrite shows up in recent dictations as `[voice edit]`, so you can copy it again. It is not written to the daily dictation log.
+- The log gets timings and word counts only. The selection, the instruction and the result are never logged unless `privacy.debug_log_transcripts` is on.
+- The model is `openai.text_model` (`gpt-6-luna`) with the prompt in `app/prompts/voice_edit.md`. In a dry run the selection comes back in capitals, with no OpenAI call.
+- Change the keys with `hotkeys.voice_edit_hold` (the dictate key plus one more key), or set it to `""` to turn voice edit off.
+- Some apps copy the whole line when nothing is selected (VS Code does), so there the voice edit works on that line.
 
 ### Recent dictations
 

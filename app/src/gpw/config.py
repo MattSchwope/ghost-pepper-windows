@@ -33,6 +33,9 @@ class HotkeyConfig:
     paste_last: str = "^!l"  # Ctrl+Alt+L: paste the latest dictation again. Empty turns it off.
     tap_ms: int = 250
     double_tap_ms: int = 400
+    # Phase 3: hold the dictate key plus one more key to voice-edit the selection. Empty turns it off.
+    voice_edit_hold: str = "RCtrl+RShift"
+    voice_edit_key: str = "RShift"  # the key added to the dictate key, worked out from voice_edit_hold
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,13 @@ UPLOAD_FORMATS = ("flac", "wav")
 class CleanupConfig:
     remove_fillers: bool = True
     spoken_commands: bool = True
+
+
+@dataclass(frozen=True)
+class VoiceEditConfig:
+    max_words: int = 3000  # longer selections get a tooltip and are not sent
+    max_output_tokens: int = 8000  # room for a 3,000-word selection that the instruction makes longer
+    timeout_seconds: float = 60.0  # per OpenAI attempt
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,7 @@ class AppConfig:
     hotkeys: HotkeyConfig = HotkeyConfig()
     dictation: DictationConfig = DictationConfig()
     cleanup: CleanupConfig = CleanupConfig()
+    voice_edit: VoiceEditConfig = VoiceEditConfig()
     dictionary: DictionaryConfig = DictionaryConfig()
     snippets: SnippetsConfig = SnippetsConfig()
 
@@ -181,12 +192,47 @@ def parse_hotkeys(raw: dict[str, Any]) -> HotkeyConfig:
         paste_last=str(raw.get("paste_last", d.paste_last) or "").strip(),
         tap_ms=_positive(raw.get("tap_ms", d.tap_ms), "hotkeys.tap_ms"),
         double_tap_ms=_positive(raw.get("double_tap_ms", d.double_tap_ms), "hotkeys.double_tap_ms"),
+        **parse_voice_edit_hold(raw.get("voice_edit_hold", _default_voice_edit_hold(raw)), str(raw.get("dictate") or d.dictate)),
     )
     check_hotkeys({
         "dictate": hotkeys.dictate, "cancel": hotkeys.cancel, "add_word": hotkeys.add_word,
         "recent": hotkeys.recent, "paste_last": hotkeys.paste_last,
     })
     return hotkeys
+
+
+def parse_voice_edit_hold(value: Any, dictate: str) -> dict[str, str]:
+    """hotkeys.voice_edit_hold, such as "RCtrl+RShift": the dictate key plus one more key, held together.
+
+    Returns the HotkeyConfig fields: the setting as written and the added key. Empty, null or false turns it off.
+    """
+    hold = "" if value is None or value is False else str(value).strip()
+    if not hold:
+        return {"voice_edit_hold": "", "voice_edit_key": ""}
+    parts = [part.strip() for part in hold.split("+")]
+    dictate_key = hotkey_identity(dictate.strip())[1]
+    keys = [hotkey_identity(part)[1] if part else "" for part in parts]
+    if len(parts) != 2 or "" in keys or keys[0] == keys[1] or dictate_key not in keys:
+        raise ValueError(
+            f"hotkeys.voice_edit_hold must be the dictate key ({dictate.strip()}) plus one more key, "
+            f'such as "{dictate.strip()}+RShift", or "" to turn voice edit off; got "{hold}"'
+        )
+    return {"voice_edit_hold": hold, "voice_edit_key": parts[1] if keys[0] == dictate_key else parts[0]}
+
+
+def _default_voice_edit_hold(hotkeys: dict[str, Any]) -> str:
+    """RCtrl+RShift, or the configured dictate key plus RShift, so a custom dictate key still starts."""
+    dictate = str(hotkeys.get("dictate") or HotkeyConfig.dictate).strip()
+    return "" if hotkey_identity(dictate)[1] == "rshift" else f"{dictate}+RShift"
+
+
+def parse_voice_edit(raw: dict[str, Any]) -> VoiceEditConfig:
+    d = VoiceEditConfig()
+    return VoiceEditConfig(
+        max_words=_positive(raw.get("max_words", d.max_words), "voice_edit.max_words"),
+        max_output_tokens=_positive(raw.get("max_output_tokens", d.max_output_tokens), "voice_edit.max_output_tokens"),
+        timeout_seconds=_positive(raw.get("timeout_seconds", d.timeout_seconds), "voice_edit.timeout_seconds", float),
+    )
 
 
 def parse_dictation(raw: dict[str, Any]) -> DictationConfig:
@@ -292,6 +338,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
             remove_fillers=bool(cleanup.get("remove_fillers", True)),
             spoken_commands=bool(cleanup.get("spoken_commands", True)),
         ),
+        voice_edit=parse_voice_edit(raw.get("voice_edit") or {}),
         dictionary=parse_dictionary_config(raw.get("dictionary") or {}),
         snippets=parse_snippets_config(raw.get("snippets") or {}),
     )

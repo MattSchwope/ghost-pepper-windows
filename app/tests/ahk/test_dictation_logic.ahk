@@ -17,6 +17,13 @@ Check(name, actual, expected) {
     FileAppend("FAIL " name ": got [" actual "] expected [" expected "]`n", "*")
 }
 
+RepeatText(text, times) {
+    out := ""
+    loop times
+        out .= text
+    return out
+}
+
 S(state, event, held := 0, combo := false) {
     step := NextStep(state, event, held, combo, 250)
     return step[1] "/" step[2]
@@ -51,6 +58,40 @@ Check("busy: key up ignored", S("busy", "up", 50), "busy/none")
 Check("busy: Esc aborts", S("busy", "cancel"), "idle/abort")
 Check("busy: done", S("busy", "done"), "idle/none")
 Check("busy: limit ignored", S("busy", "max_timeout"), "busy/none")
+
+; Voice edit (Phase 3): the dictate key held, then the voice-edit key
+Check("edit: voice-edit key while holding starts an edit", S("held", "edit"), "edit/edit")
+Check("edit: also from the second press of a double tap", S("held2", "edit"), "edit/edit")
+Check("edit: key repeat is ignored", S("edit", "edit"), "edit/none")
+Check("edit: letting go of the dictate key stops", S("edit", "up", 900), "busy/stop")
+Check("edit: letting go of the voice-edit key stops", S("edit", "edit_up"), "busy/stop")
+Check("edit: a shortcut such as RCtrl+RShift+Left cancels quietly", S("edit", "edit_up", 0, true), "idle/cancel_quiet")
+Check("edit: Esc cancels", S("edit", "cancel"), "idle/cancel")
+Check("edit: limit stops", S("edit", "max_timeout"), "busy/stop")
+Check("edit: late done is ignored", S("edit", "done"), "edit/none")
+Check("edit: voice-edit key alone does nothing", S("idle", "edit"), "idle/none")
+Check("edit: not while waiting for a second tap", S("tapped", "edit"), "tapped/none")
+Check("edit: not in hands-free", S("handsfree", "edit"), "handsfree/none")
+Check("edit: not while transcribing", S("busy", "edit"), "busy/none")
+Check("edit: release after the edit was dropped", S("idle", "edit_up"), "idle/none")
+Check("edit: second release while transcribing", S("busy", "edit_up"), "busy/none")
+
+; Which releases count as a shortcut
+Check("combo: dictate key alone", IsCombo("RControl", "RControl", "RShift"), false)
+Check("combo: voice-edit key last", IsCombo("RShift", "RControl", "RShift"), false)
+Check("combo: another key", IsCombo("c", "RControl", "RShift"), true)
+Check("combo: RShift with voice edit off", IsCombo("RShift", "RControl", ""), true)
+Check("combo: nothing pressed before", IsCombo("", "RControl", ""), true)
+
+; Voice-edit selection checks
+Check("words: none", WordCount(" `r`n "), 0)
+Check("words: lines and tabs", WordCount("Make it`r`nshorter,`tplease"), 4)
+Check("words: 2,000", WordCount(RepeatText("word ", 2000)), 2000)
+Check("selection: empty", VoiceEditProblem("", 3000), "Select text first, then hold the voice-edit keys and say the change.")
+Check("selection: only a line break", VoiceEditProblem("`r`n", 3000), "Select text first, then hold the voice-edit keys and say the change.")
+Check("selection: 2,000 words is fine", VoiceEditProblem(RepeatText("word ", 2000), 3000), "")
+Check("selection: over the limit", VoiceEditProblem(RepeatText("word ", 3001), 3000),
+    "The selection is 3001 words. Voice edit takes up to 3000, so nothing was changed.")
 
 ; Idle
 Check("idle: stray release", S("idle", "up", 50), "idle/none")
