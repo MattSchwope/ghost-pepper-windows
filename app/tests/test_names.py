@@ -26,6 +26,9 @@ from gpw.names import (
         # not in the name list: by sound and spelling
         ("Smith", "Smyth"), ("Johnson", "Jonson"), ("Peterson", "Petersen"), ("Schwope", "Shwope"),
         ("Nguyen", "Nguyan"), ("Okafor", "Okafur"), ("Kavaliro", "Cavaliro"), ("Zoë", "Zoe"),
+        # a light first syllable said as "uh"
+        ("Lamont", "Lemonte"), ("Lamonte", "Lemonte"), ("DeShawn", "Dashawn"), ("Delaney", "Dalaney"),
+        ("Latoya", "Letoya"),
     ],
 )
 def test_spellings_of_one_name_sound_alike(a, b):
@@ -39,6 +42,7 @@ def test_spellings_of_one_name_sound_alike(a, b):
         ("Aaron", "Erin"), ("Ellen", "Allen"), ("Kyle", "Kelly"), ("Kelly", "Kayla"), ("Jan", "Jen"),
         ("Bill", "William"),  # nicknames are other names
         ("Smith", "Smart"), ("Sun", "Sean"), ("Schmidt", "Smith"), ("Patel", "Pratt"),
+        ("Karen", "Koren"), ("Davis", "Devis"), ("Dana", "Dena"), ("Mason", "Mosen"), ("Lamont", "Lambert"),
     ],
 )
 def test_different_names_do_not(a, b):

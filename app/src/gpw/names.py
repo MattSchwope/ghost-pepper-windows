@@ -20,6 +20,7 @@ from functools import lru_cache
 from .name_data import COMMON_WORDS, variant_groups
 
 SIMILARITY = 0.55
+LIGHT_SYLLABLE_SIMILARITY = 0.7  # stricter when the first vowels differ (Lamont, Lemonte)
 MAX_SCREEN_NAMES = 30  # names (one to three words each) sent as keywords per dictation
 MAX_NAME_WORDS = 300  # single words kept for respelling
 MAX_RUN_WORDS = 3
@@ -171,8 +172,28 @@ def sounds_alike(a: str, b: str) -> bool:
         return False
     va, vb = vowel_classes(a), vowel_classes(b)
     if va and vb and not va & vb:
-        return False
+        # Lamont and Lemonte, DeShawn and Dashawn: a light first syllable is said as "uh",
+        # so its vowel can differ when the rest of the name matches. Sean and Shane still don't.
+        return _light_first_syllables(a, b) and spelling_similarity(a, b) >= LIGHT_SYLLABLE_SIMILARITY
     return spelling_similarity(a, b) >= SIMILARITY
+
+
+_LIGHT_FIRST = re.compile(r"[^aeiouy]{1,2}[aeiou](?=[^aeiouy])")
+
+
+def _light_first_syllables(a: str, b: str) -> bool:
+    """Do both names open with a consonant and one short vowel, then match from the next vowel on?"""
+    fa, fb = _fold(a), _fold(b)
+    if min(len(fa), len(fb)) < 5:
+        return False
+    ma, mb = _LIGHT_FIRST.match(fa), _LIGHT_FIRST.match(fb)
+    if not ma or not mb:
+        return False
+    ra, rb = fa[ma.end():], fb[mb.end():]
+    # A short rest is likely the stressed part's tail (Karen, Koren; Davis, Devis): keep those apart.
+    if min(len(ra), len(rb)) < 4:
+        return False
+    return bool(vowel_classes(ra) & vowel_classes(rb))
 
 
 # -- reading names off the screen --
