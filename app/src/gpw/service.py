@@ -101,6 +101,7 @@ class DictationService:
         assets_dir: Path | None = None,
         post_executor: Executor | None = None,
         now: Callable[[], datetime] = datetime.now,
+        meetings: Any = None,
     ) -> None:
         self.config = config
         self.engine = engine
@@ -109,6 +110,7 @@ class DictationService:
         self.dictionary = dictionary
         self.snippets = snippets
         self.learner = learner
+        self.meetings = meetings  # meeting.MeetingManager: keeps dictation out of the meeting's mic track
         self.dry_run = dry_run
         self.assets_dir = assets_dir or config.data_dir / "assets"
         self.now = now
@@ -136,6 +138,8 @@ class DictationService:
         self.load_recent()
         if self.learner is not None:
             self.learner.start()
+        if self.meetings is not None:
+            self.meetings.open()  # finish meetings a previous run stopped but never processed
 
     def load_recent(self) -> None:
         """Refill recent dictations from today's daily log, so a restart does not empty the window."""
@@ -155,6 +159,8 @@ class DictationService:
 
     def close(self) -> None:
         self._cancel_watchdog()
+        if self.meetings is not None:
+            self.meetings.close()
         if self.learner is not None:
             self.learner.close()
         with self._mic_lock:
@@ -185,6 +191,8 @@ class DictationService:
             "add_word_key": h.add_word,
             "recent_key": h.recent,
             "paste_last_key": h.paste_last,
+            "meeting_key": h.meeting if self.meetings is not None else "",
+            "meeting_capture_mic": self.config.meetings.capture_mic,
             "dictionary_path": self.dictionary.path.as_posix() if self.dictionary else "",
             "snippets_path": self.snippets.path.as_posix() if self.snippets else "",
             "auto_learn": self.learner is not None and self.learner.available,
@@ -208,6 +216,7 @@ class DictationService:
                 self._discard_locked()
             started = time.perf_counter()
             self._open_mic()
+            self._meeting_hold(True)
             self._id += 1
             self._state = "recording"
             self._session = {
@@ -241,6 +250,8 @@ class DictationService:
                 raise MicError(str(exc)) from exc
 
     def _refresh_devices_locked(self) -> None:
+        if self.meetings is not None and self.meetings.capturing:
+            return  # a rescan restarts PortAudio, which would stop the meeting's mic track
         self.mic.refresh_devices()
         self._last_refresh = time.monotonic()
 
@@ -260,7 +271,12 @@ class DictationService:
         self._cancel_watchdog()
         with self._mic_lock:
             self.mic.cancel()
+        self._meeting_hold(False)
         self._state = "idle"
+
+    def _meeting_hold(self, on: bool) -> None:
+        if self.meetings is not None:
+            self.meetings.set_dictating(on)
 
     def _arm_watchdog(self, dictation_id: int) -> None:
         # If the hotkey script dies mid-recording, close the mic instead of listening forever.
@@ -326,6 +342,7 @@ class DictationService:
         d = self.config.dictation
         with self._mic_lock:
             raw = self.mic.stop()
+        self._meeting_hold(False)
         rate = self.mic.sample_rate
         stopped = time.perf_counter()
         record.update(mode=mode, record_end=_r(stopped - released))

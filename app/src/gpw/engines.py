@@ -111,5 +111,24 @@ class DryRunEngine:
         seconds = sf.info(io.BytesIO(data)).duration
         return TimedText(f"Dry run: heard {seconds:.1f} seconds of audio.", 0.0, None)
 
+    def transcribe(self, path: Path, prompt: str | None, keywords: list[str], languages: list[str]) -> str:
+        """For meeting capture and files in a dry run."""
+        import soundfile as sf
+
+        return f"Dry run: heard {sf.info(str(path)).duration:.1f} seconds of speech."
+
     def prewarm(self) -> None:
         pass
+
+
+class DryRunTextModel:
+    """Stands in for the summary model in a dry run. No network."""
+
+    model = "dry-run"
+
+    def complete(self, instructions: str, text: str) -> str:
+        lines = sum(1 for line in text.splitlines() if line.startswith("["))
+        return (
+            "Title: Dry run meeting\n\n### Overview\nDry run: nothing was sent to OpenAI. "
+            f"The transcript below is placeholder text, one line per stretch of speech ({lines} in all)."
+        )

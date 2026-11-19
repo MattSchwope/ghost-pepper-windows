@@ -61,6 +61,8 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 | `gpw latency` | Release-to-paste report from the dictation timing log: median, 90th percentile, and where the time goes. `--last 50` for the most recent 50 |
 | `gpw dictionary` | Shows where the personal dictionary is, how many terms and fixes it has, how many terms go out with each dictation, and any error in the file. Creates a starter file if there is none |
 | `gpw snippets` | Shows where the snippets file is, the phrases you can say, and any error in the file. Creates a starter file if there is none |
+| `gpw meeting list` | Lists meeting captures, newest first, with their status (done, failed, interrupted, ...) and where the note went |
+| `gpw meeting retry "2026-11-18 1405"` | Turns a failed or cut-off meeting capture into a note. Parts already transcribed are not sent again |
 
 The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
 
@@ -84,8 +86,9 @@ A green dot appears in the system tray, and the script starts the Python service
 | Hold Right Ctrl, say "insert signature", let go | Pastes that snippet |
 | Ctrl+Alt+H, or left-click the tray dot | Opens the last 10 dictations, newest first, with a copy button on each |
 | Ctrl+Alt+L | Pastes the latest dictation again, into whatever has focus now. Your clipboard is put back afterwards |
+| Ctrl+Alt+M | Starts meeting capture, or stops it. See [Meeting capture](#meeting-capture) |
 
-The tray dot is green when ready, red while listening, pink in hands-free and amber while transcribing. Left-click it for recent dictations. Right-click it for Recent dictations, today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
+The tray dot is green when ready, red while listening, pink in hands-free, amber while transcribing and blue while a meeting is being captured. Left-click it for recent dictations. Right-click it for Recent dictations, meeting capture, today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
 
 - Clips with no speech are skipped: no API call and no paste.
 - Every dictation is appended to `C:\GhostPepperWindows\notes\dictation\YYYY-MM-DD.md` (`dictation.daily_log`).
@@ -137,6 +140,37 @@ outreach: "One line works too. Use quotes if it contains a colon."
 - OpenAI still has to hear the phrase, so release to paste takes about as long as any short dictation. Everything after the transcript is local. `gpw latency` reports both times.
 - If a name keeps being misheard, add it to `terms:` in the dictionary, or add a fix to `replace:`.
 - The daily log records `[snippet: <name>]` and what was heard, not the snippet's text.
+
+## Meeting capture
+
+Transcribe a Teams or Zoom call, or a webinar, from this PC's own audio. No bot joins the call and nothing is installed in Teams or Zoom. A note with a summary and a Me/Them transcript lands in `C:\GhostPepperWindows\notes\meetings\` shortly after the call.
+
+**Consent.** Teams and Zoom tell everyone when *they* record a call. This capture tells nobody. It is on you to ask the people on the call before you record them, wherever the law or your company requires it, and in many places it does. Capture never starts on its own.
+
+1. Join the call as usual, so it plays on this PC's speakers or headset.
+2. Press Ctrl+Alt+M, or right-click the tray dot and choose **Start meeting capture**. The dot turns blue and its tooltip counts the time.
+3. When the call ends, press Ctrl+Alt+M again, or choose **Stop meeting capture**.
+4. A notice says **Meeting note ready**. Click it to open the note. The note is `notes\meetings\YYYY-MM-DD HHMM <title>.md`: a title, a short overview, decisions, action items and open questions, then the full transcript with lines like `[00:12:03] Me: ...` and `[00:12:09] Them: ...`.
+
+What it records:
+
+- **Them** is whatever plays on the default speaker or headset, so everyone on the far end is "Them". **Me** is your mic (the dictation mic). Each goes to its own file while it records, under `C:\GhostPepperWindows\meetings\<YYYY-MM-DD HHMM>\`, so a crash keeps everything up to that point.
+- Use a headset if you can. On laptop speakers the mic also hears the call; lines where your mic only repeated the call are dropped, but a headset is cleaner.
+- Plugging in a headset mid-call is fine: the capture follows the new default device.
+- **Mute my mic track** in the tray menu keeps a side conversation out of the transcript. Muting yourself in Teams or Zoom does not mute this track.
+- Dictation keeps working during a capture. What you dictate is pasted as usual and kept out of the meeting.
+- For a webinar where you only listen, set `meetings.capture_mic: false` to record the call audio only.
+- Capture stops on its own after `meetings.max_hours` (4). If nothing has been heard from the call after 2 minutes, a tooltip says so: the call is probably playing on another device.
+
+After the call:
+
+- Only the stretches with speech are sent to GPT-Transcribe, in batches, with your dictionary terms as spelling hints. Dictionary fixes are applied; light cleanup is not, so the transcript stays word for word. `openai.summary_model` writes the summary from `app/prompts/meeting_capture.md`.
+- The two audio files are deleted once the note is written, unless `meetings.keep_audio: true`.
+- If something fails (no internet, for example), the audio stays, a notice says so, and the tray menu offers **Retry failed meeting**. `gpw meeting retry "<folder>"` does the same from PowerShell, and `gpw meeting list` shows every capture and its status. Parts already transcribed are not paid for twice.
+- If the service was killed mid-call, the audio up to that moment is kept and shows as `interrupted` in `gpw meeting list`; `gpw meeting retry` turns it into a note. A capture that was stopped but not yet processed is finished the next time the service starts.
+- Restart and Exit in the tray menu ask first while a meeting is being captured, then stop it so its note is written when Ghost Pepper next runs.
+- Transcript text and audio never go into the service log, only counts and timings. Cost is about $0.27 per hour of speech plus a cent or two for the summary.
+- Settings: `hotkeys.meeting`, the `meetings:` block, and `files.meetings` for where the audio is kept while it is processed. `.\app\scripts\start_dictation.ps1 -DryRun` tries a capture end to end without calling OpenAI.
 
 ## Success definition
 

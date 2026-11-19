@@ -31,6 +31,7 @@ class HotkeyConfig:
     add_word: str = "^!d"  # AutoHotkey syntax: Ctrl+Alt+D. Empty turns it off.
     recent: str = "^!h"  # Ctrl+Alt+H: the recent-dictations window. Empty turns it off.
     paste_last: str = "^!l"  # Ctrl+Alt+L: paste the latest dictation again. Empty turns it off.
+    meeting: str = "^!m"  # Ctrl+Alt+M: start or stop meeting capture. Empty turns it off.
     tap_ms: int = 250
     double_tap_ms: int = 400
 
@@ -78,6 +79,14 @@ class SnippetsConfig:
 
 
 @dataclass(frozen=True)
+class MeetingsConfig:
+    capture_mic: bool = True  # False records only the call audio, for webinars where you just listen
+    max_hours: float = 4.0  # capture stops on its own after this long
+    keep_audio: bool = False  # keep the two tracks after the note is written
+    folder: Path | None = None  # files.meetings; None: <data_dir>/meetings
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_dir: Path
     audio_dir: Path
@@ -103,6 +112,12 @@ class AppConfig:
     cleanup: CleanupConfig = CleanupConfig()
     dictionary: DictionaryConfig = DictionaryConfig()
     snippets: SnippetsConfig = SnippetsConfig()
+    meetings: MeetingsConfig = MeetingsConfig()
+
+    @property
+    def meetings_dir(self) -> Path:
+        """Audio while a meeting is captured and processed (files.meetings)."""
+        return self.meetings.folder or self.data_dir / "meetings"
 
     @property
     def work_dir(self) -> Path:
@@ -179,12 +194,13 @@ def parse_hotkeys(raw: dict[str, Any]) -> HotkeyConfig:
         add_word=str(raw.get("add_word", d.add_word) or "").strip(),
         recent=str(raw.get("recent", d.recent) or "").strip(),
         paste_last=str(raw.get("paste_last", d.paste_last) or "").strip(),
+        meeting=str(raw.get("meeting", d.meeting) or "").strip(),
         tap_ms=_positive(raw.get("tap_ms", d.tap_ms), "hotkeys.tap_ms"),
         double_tap_ms=_positive(raw.get("double_tap_ms", d.double_tap_ms), "hotkeys.double_tap_ms"),
     )
     check_hotkeys({
         "dictate": hotkeys.dictate, "cancel": hotkeys.cancel, "add_word": hotkeys.add_word,
-        "recent": hotkeys.recent, "paste_last": hotkeys.paste_last,
+        "recent": hotkeys.recent, "paste_last": hotkeys.paste_last, "meeting": hotkeys.meeting,
     })
     return hotkeys
 
@@ -228,6 +244,20 @@ def parse_dictionary_config(raw: dict[str, Any]) -> DictionaryConfig:
 def parse_snippets_config(raw: dict[str, Any]) -> SnippetsConfig:
     path = raw.get("path")
     return SnippetsConfig(path=Path(path) if path else None)
+
+
+def parse_meetings_config(raw: dict[str, Any], files: dict[str, Any]) -> MeetingsConfig:
+    d = MeetingsConfig()
+    folder = files.get("meetings")
+    max_hours = _positive(raw.get("max_hours", d.max_hours), "meetings.max_hours", float)
+    if max_hours > 24:
+        raise ValueError(f"meetings.max_hours must be 24 or less; got {max_hours:g}")
+    return MeetingsConfig(
+        capture_mic=bool(raw.get("capture_mic", d.capture_mic)),
+        max_hours=max_hours,
+        keep_audio=bool(raw.get("keep_audio", d.keep_audio)),
+        folder=Path(folder) if folder else None,
+    )
 
 
 def parse_config(raw: dict[str, Any]) -> AppConfig:
@@ -294,6 +324,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         ),
         dictionary=parse_dictionary_config(raw.get("dictionary") or {}),
         snippets=parse_snippets_config(raw.get("snippets") or {}),
+        meetings=parse_meetings_config(raw.get("meetings") or {}, raw.get("files") or {}),
     )
 
 

@@ -23,6 +23,8 @@ SOUNDS: dict[str, tuple[list[float], int]] = {
     "cancel": ([440, 330], 50),
     "empty": ([330], 90),
     "error": ([220, 0, 220], 80),
+    "meeting_start": ([523, 659, 784], 60),
+    "meeting_stop": ([784, 659, 523], 60),
 }
 
 ICONS: dict[str, tuple[int, int, int]] = {
@@ -30,6 +32,7 @@ ICONS: dict[str, tuple[int, int, int]] = {
     "recording": (229, 57, 53),  # red: listening
     "handsfree": (216, 27, 96),  # magenta: hands-free listening
     "busy": (255, 179, 0),  # amber: transcribing
+    "meeting": (30, 136, 229),  # blue: capturing a meeting, dictation ready
 }
 
 

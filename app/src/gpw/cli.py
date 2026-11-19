@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("snippets", help="Show the snippets: where the file is, the names you can say, any errors")
 
+    meeting = subparsers.add_parser("meeting", help="Meeting captures: list them, or finish one that failed")
+    meeting_sub = meeting.add_subparsers(dest="meeting_command", required=True)
+    meeting_sub.add_parser("list", help="Show captures, newest first, with their status and note")
+    retry = meeting_sub.add_parser("retry", help="Turn a capture into a note, reusing the parts already transcribed")
+    retry.add_argument("folder", help='The capture folder\'s name, such as "2026-11-18 1405", or its path')
+
     return parser
 
 
@@ -209,6 +215,21 @@ def run_eval_command(config: AppConfig, clips_dir: Path, prep_arg: str, results_
     return 0 if len(results) == len(clips) * len(preps) else 1
 
 
+def _meeting_processor(config: AppConfig, dry_run: bool = False, client=None):
+    from .engines import DryRunEngine, DryRunTextModel, OpenAIEngine
+    from .meeting import MeetingProcessor
+
+    if dry_run:
+        return MeetingProcessor(config, DryRunEngine(), DryRunTextModel(), _dictionary(config))
+    from .openai_client import make_client
+    from .text_client import OpenAITextClient
+
+    client = client or make_client(config.openai)
+    engine = OpenAIEngine(client, config.openai.transcribe_model)
+    summary = OpenAITextClient(client, config.openai.summary_model, reasoning_effort=None)
+    return MeetingProcessor(config, engine, summary, _dictionary(config))
+
+
 def build_service(config: AppConfig, dry_run: bool):
     from .assets import write_assets
     from .engines import DryRunEngine, OpenAIEngine
@@ -218,6 +239,7 @@ def build_service(config: AppConfig, dry_run: bool):
 
     d = config.dictation
     clean = None
+    client = None
     dictionary = _dictionary(config)
     dictionary.ensure_file()
     dictionary.current()  # logs the counts, or the error, at startup
@@ -252,10 +274,20 @@ def build_service(config: AppConfig, dry_run: bool):
 
         learner = Learner(dictionary, UIAReader, config.dictionary.learn_seconds, log_text=config.debug_log_transcripts)
     assets = write_assets(config.data_dir / "assets")
-    return DictationService(
+    service = DictationService(
         config, engine, mic, clean=clean, dictionary=dictionary, snippets=snippets, learner=learner,
         dry_run=dry_run, assets_dir=assets,
     )
+    from .meeting import MeetingManager
+    from .meeting_capture import DeviceBackend
+
+    # The meeting's mic track shares dictation's PortAudio lock; processing reuses the service's OpenAI client.
+    service.meetings = MeetingManager(
+        config,
+        lambda: DeviceBackend(config.input_device, service._mic_lock),
+        lambda: _meeting_processor(config, dry_run, client),
+    )
+    return service
 
 
 def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
@@ -331,6 +363,61 @@ def run_snippets(config: AppConfig) -> int:
     return 0
 
 
+def _meeting_detail(info) -> str:
+    quoted = f'"{info.name}"'
+    if info.status == "done":
+        note = str(info.meta.get("note") or "")
+        return note + ("  (audio kept)" if info.has_audio else "")
+    if info.status == "failed":
+        reason = str(info.meta.get('error') or 'see the log').rstrip('.')
+        return f"{info.meta.get('stage') or 'processing'} failed: {reason}. Run: gpw meeting retry {quoted}"
+    if info.status == "interrupted":
+        return f"cut off while recording; the audio up to then is kept. Run: gpw meeting retry {quoted}"
+    if info.status == "empty":
+        return f"no speech heard on either track; audio kept in {info.folder}"
+    if info.status == "stopped":
+        return "waiting to be processed; the service picks it up when it starts"
+    if info.status == "recording":
+        return "capturing now"
+    if info.status == "processing":
+        return "being processed now"
+    return ""
+
+
+def run_meeting_list(config: AppConfig) -> int:
+    from .longform import fmt_ts
+    from .meeting import list_meetings
+
+    infos = list_meetings(config.meetings_dir)
+    if not infos:
+        sys.stdout.write(f"No meeting captures in {config.meetings_dir}.\n")
+        return 0
+    sys.stdout.write(f"Meeting captures in {config.meetings_dir}, newest first:\n\n")
+    for info in infos:
+        sys.stdout.write(f"{info.name:<20} {info.status:<12} {fmt_ts(info.seconds)}  {_meeting_detail(info)}\n")
+    return 0
+
+
+def run_meeting_retry(config: AppConfig, name: str) -> int:
+    from .meeting import effective_status, find_meeting, read_meta
+
+    folder = find_meeting(config.meetings_dir, name)
+    meta = read_meta(folder)
+    status = effective_status(meta)
+    if status in ("recording", "processing"):
+        sys.stdout.write(f"{folder.name} is {status} in the running service (pid {meta.get('pid')}). Try again when it is done.\n")
+        return 1
+    if status == "done":
+        sys.stdout.write(f"{folder.name} already has its note: {meta.get('note', '')}\n")
+        return 0
+    result = _meeting_processor(config).process(folder)
+    if result.status == "done":
+        sys.stdout.write(f"Note written: {result.note}\n")
+        return 0
+    sys.stdout.write(f"{result.message}\n")
+    return 0 if result.status == "empty" else 1
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -351,6 +438,10 @@ def main(argv: list[str] | None = None) -> None:
             code = run_dictionary(config)
         elif args.command == "snippets":
             code = run_snippets(config)
+        elif args.command == "meeting" and args.meeting_command == "list":
+            code = run_meeting_list(config)
+        elif args.command == "meeting" and args.meeting_command == "retry":
+            code = run_meeting_retry(config, args.folder)
         else:
             code = 1
     except (FileNotFoundError, RuntimeError, ValueError) as exc:

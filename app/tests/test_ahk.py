@@ -89,6 +89,11 @@ def test_hotkey_http_client_against_the_real_server(tmp_path):
     assert json.loads(service.latency_log.read_text(encoding="utf-8").splitlines()[0])["release_to_paste"] == 1.234
 
 
+def test_meeting_helpers():
+    result = run_ahk(str(REPO_ROOT / "app" / "tests" / "ahk" / "test_meeting_logic.ahk"))
+    assert result.returncode == 0 and "ALL PASSED" in result.stdout, result.stdout + result.stderr
+
+
 def test_recent_window_helpers():
     result = run_ahk(str(REPO_ROOT / "app" / "tests" / "ahk" / "test_recent_logic.ahk"))
     assert result.returncode == 0 and "ALL PASSED" in result.stdout, result.stdout + result.stderr

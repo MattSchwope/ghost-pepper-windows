@@ -3,6 +3,7 @@
 #Include %A_ScriptDir%\lib\dictation_logic.ahk
 #Include %A_ScriptDir%\lib\service_client.ahk
 #Include %A_ScriptDir%\lib\recent_logic.ahk
+#Include %A_ScriptDir%\lib\meeting_logic.ahk
 
 ; Ghost Pepper Windows hotkeys. The Python service (gpw serve) records and transcribes;
 ; this script owns the keys, the cue sounds, the tray icon and the paste (ADR-003).
@@ -13,6 +14,7 @@
 ;   Say "insert signature" as a whole dictation: the service answers with that snippet's text.
 ;   Ctrl+Alt+H or a click on the tray icon: the last 10 dictations, with copy buttons.
 ;   Ctrl+Alt+L: paste the latest dictation again, after it went to the wrong window.
+;   Ctrl+Alt+M or the tray menu: start or stop meeting capture. The note is written after the call.
 ; Keys and timings come from config.yaml (hotkeys:, dictation:) through the service's /health.
 ; Start it with app\scripts\start_dictation.ps1. Pass --dry-run to paste a fixed sentence
 ; instead of calling OpenAI.
@@ -43,6 +45,15 @@ CancelKey := "Esc"
 AddWordKey := ""
 RecentKey := ""
 PasteLastKey := ""
+MeetingKey := ""
+MeetingOn := false  ; a meeting is being captured (from the service's /meeting/status)
+MeetingElapsed := 0
+MeetingMuted := false
+MeetingMicTrack := true
+MeetingRetry := ""
+MeetingSeen := Map()  ; sequence numbers already announced (MeetingNotices)
+MeetingMenuItem := "Start meeting capture"
+ToastTarget := ""  ; what clicking the last meeting notice opens
 RecentGui := ""
 RecentItems := []
 RecentRows := Map()  ; control hwnd -> row number, for the hover text
@@ -77,14 +88,17 @@ Main() {
     try Http("POST", "/cancel")  ; drop anything a previous run left behind
     try BindHotkeys()
     catch as bindError {
-        MsgBox("A key in the hotkeys: block of config.yaml (dictate, cancel, add_word, recent or paste_last) "
+        MsgBox("A key in the hotkeys: block of config.yaml (dictate, cancel, add_word, recent, paste_last or meeting) "
             . "is not a key AutoHotkey knows.`n`n" bindError.Message,
             "Ghost Pepper", "Iconx")
         ExitApp(1)
     }
     OnExit(OnScriptExit)
     OnMessage(0x0006, OnRecentActivate)  ; WM_ACTIVATE
+    OnMessage(0x0404, OnTrayNotify)  ; the tray icon's messages, for clicks on a meeting notice
     SetIcon("idle")
+    PollMeeting()
+    SetTimer(PollMeeting, 1000)
     TrayTip("Hold " DictateKey " to dictate. Double-tap it for hands-free." (DryRun ? "`nDry run: nothing goes to OpenAI." : ""),
         "Ghost Pepper is ready", "Mute")
 }
@@ -139,6 +153,7 @@ LoadSettings(health) {
     AddWordKey := JsonValue(health, "add_word_key", "")
     RecentKey := JsonValue(health, "recent_key", "")
     PasteLastKey := JsonValue(health, "paste_last_key", "")
+    MeetingKey := JsonValue(health, "meeting_key", "")
     DictionaryPath := StrReplace(JsonValue(health, "dictionary_path"), "/", "\")
     SnippetsPath := StrReplace(JsonValue(health, "snippets_path"), "/", "\")
     TapMs := Integer(JsonValue(health, "tap_ms", 250))
@@ -170,6 +185,8 @@ BindHotkeys() {
         Hotkey(RecentKey, ToggleRecent)
     if (PasteLastKey != "")
         Hotkey(PasteLastKey, OnPasteLast)
+    if (MeetingKey != "")
+        Hotkey(MeetingKey, ToggleMeeting)
     ; Number keys pick a row, only while the recent-dictations window is the active window.
     HotIf(RecentIsActive)
     loop 10 {
@@ -562,19 +579,34 @@ SetupTray() {
     A_TrayMenu.Default := "Recent dictations"
     A_TrayMenu.ClickCount := 1  ; a single left-click on the tray icon opens it
     A_TrayMenu.Add()
+    A_TrayMenu.Add(MeetingMenuItem, ToggleMeeting)
+    A_TrayMenu.Add("Mute my mic track", ToggleMeetingMute)
+    A_TrayMenu.Add("Retry failed meeting", RetryMeeting)
+    A_TrayMenu.Add("Open meeting notes", OpenMeetingNotes)
+    A_TrayMenu.Disable("Mute my mic track")
+    A_TrayMenu.Disable("Retry failed meeting")
+    A_TrayMenu.Add()
     A_TrayMenu.Add("Open today's dictation log", OpenDailyLog)
     A_TrayMenu.Add("Open dictionary", OpenDictionary)
     A_TrayMenu.Add("Open snippets", OpenSnippets)
     A_TrayMenu.Add("Open log folder", OpenLogs)
     A_TrayMenu.Add()
     A_TrayMenu.Add("Restart (reloads config)", RestartAll)
-    A_TrayMenu.Add("Exit", (*) => ExitApp())
+    A_TrayMenu.Add("Exit", ExitAll)
 }
 
 SetIcon(name) {
     static tips := Map("idle", "ready", "recording", "listening", "handsfree", "listening (hands-free)", "busy", "transcribing")
-    try TraySetIcon(AssetsDir "\" name ".ico")
-    A_IconTip := "Ghost Pepper: " tips[name] (DryRun ? " (dry run)" : "")
+    static shown := ""
+    icon := (name = "idle" && MeetingOn) ? "meeting" : name
+    if (icon != shown) {
+        try TraySetIcon(AssetsDir "\" icon ".ico")
+        shown := icon
+    }
+    if (icon = "meeting")
+        A_IconTip := MeetingTip(MeetingElapsed, MeetingMuted, MeetingMicTrack, DryRun)
+    else
+        A_IconTip := "Ghost Pepper: " tips[name] (DryRun ? " (dry run)" : "")
 }
 
 PlayCue(name) {
@@ -622,9 +654,194 @@ OpenLogs(*) {
 
 RestartAll(*) {
     global
+    if !StopMeetingFirst("Restart")
+        return
     if ServicePid
         try ProcessClose(ServicePid)
     Reload()
+}
+
+ExitAll(*) {
+    if StopMeetingFirst("Exit")
+        ExitApp()
+}
+
+; Before the service is stopped: a meeting being captured is stopped first, so its audio is kept
+; and its note is written when the service next starts. False if the user said no.
+StopMeetingFirst(action) {
+    if !MeetingOn
+        return true
+    answer := MsgBox("A meeting is being captured. " action " stops the capture; the note is written "
+        . "the next time Ghost Pepper runs.`n`n" action " anyway?", "Ghost Pepper", "YesNo Icon!")
+    if (answer != "Yes")
+        return false
+    try Http("POST", "/meeting/stop", "", 15000)
+    return true
+}
+
+; -- meeting capture --
+
+ToggleMeeting(*) {
+    if MeetingOn
+        StopMeeting()
+    else
+        StartMeeting()
+}
+
+StartMeeting() {
+    global MeetingOn, MeetingElapsed
+    r := ""
+    try r := Http("POST", "/meeting/start", "app=" UriEncode(FrontProgram()), 15000)
+    if (r = "") {
+        PlayCue("error")
+        ShowTip("The dictation service is not answering.", 3000)
+        return
+    }
+    if (r.status != 200) {
+        PlayCue("error")
+        ShowTip(JsonValue(r.body, "error", "Could not start meeting capture."), 5000)
+        PollMeeting()
+        return
+    }
+    MeetingOn := true
+    MeetingElapsed := 0
+    PlayCue("meeting_start")
+    stopWith := MeetingKey != "" ? HotkeyLabel(MeetingKey) " or the tray menu" : "the tray menu"
+    ShowTip("Meeting capture started" (JsonValue(r.body, "capture_mic") = "true" ? "" : " (call audio only)")
+        . ". Stop it with " stopWith ".", 3000)
+    UpdateMeetingUi()
+}
+
+StopMeeting() {
+    global MeetingOn
+    r := ""
+    try r := Http("POST", "/meeting/stop", "", 15000)
+    if (r = "") {
+        PlayCue("error")
+        ShowTip("The dictation service is not answering.", 3000)
+        return
+    }
+    MeetingOn := false
+    if (r.status = 200) {
+        PlayCue("meeting_stop")
+        ShowTip("Meeting capture stopped after " FormatElapsed(Round(JsonValue(r.body, "seconds", 0))) ". "
+            . "The note is being written; a notice says when it's ready.", 4000)
+    } else
+        ShowTip(JsonValue(r.body, "error", "Could not stop meeting capture."), 3000)
+    PollMeeting()
+}
+
+ToggleMeetingMute(*) {
+    if !MeetingOn
+        return
+    r := ""
+    try r := Http("POST", "/meeting/mute", "on=" (MeetingMuted ? 0 : 1), 3000)
+    if (r != "" && r.status = 200)
+        ShowTip(JsonValue(r.body, "muted") = "true" ? "Your mic track is muted. The call is still recorded."
+            : "Your mic track is recording again.", 2500)
+    PollMeeting()
+}
+
+RetryMeeting(*) {
+    r := ""
+    try r := Http("POST", "/meeting/retry", "", 5000)
+    if (r = "")
+        ShowTip("The dictation service is not answering.", 3000)
+    else if (r.status = 200)
+        ShowTip("Retrying meeting " JsonValue(r.body, "folder") ". A notice says when the note is ready.", 3000)
+    else
+        ShowTip(JsonValue(r.body, "error", "Could not retry it."), 4000)
+    PollMeeting()
+}
+
+OpenMeetingNotes(*) {
+    folder := NotesDir "\meetings"
+    if DirExist(folder)
+        Run(folder)
+    else
+        ShowTip("No meeting notes yet.", 2000)
+}
+
+; Ask the service how the capture is going: keeps the tray icon, tooltip and menu current,
+; and shows the notices (note ready, failed, no call audio).
+PollMeeting() {
+    global MeetingOn, MeetingElapsed, MeetingMuted, MeetingMicTrack, MeetingRetry, ToastTarget
+    r := ""
+    try r := Http("POST", "/meeting/status", "", 1500)
+    if (r = "" || r.status != 200)
+        return
+    MeetingOn := JsonValue(r.body, "capturing") = "true"
+    MeetingElapsed := Integer(JsonValue(r.body, "elapsed", 0))
+    MeetingMuted := JsonValue(r.body, "muted") = "true"
+    MeetingMicTrack := JsonValue(r.body, "mic_track") = "true"
+    MeetingRetry := JsonValue(r.body, "retry")
+    for notice in MeetingNotices(r.body, MeetingSeen) {
+        if (notice.kind = "tip")
+            ShowTip(notice.text, 8000)
+        else {
+            ToastTarget := notice.target
+            TrayTip(notice.text, notice.title, notice.title = "Meeting note failed" ? "Iconx" : "Iconi")
+        }
+    }
+    UpdateMeetingUi()
+}
+
+UpdateMeetingUi() {
+    global MeetingMenuItem
+    wanted := MeetingOn ? "Stop meeting capture" : "Start meeting capture"
+    if (wanted != MeetingMenuItem) {
+        A_TrayMenu.Rename(MeetingMenuItem, wanted)
+        MeetingMenuItem := wanted
+    }
+    if (MeetingOn && MeetingMicTrack)
+        A_TrayMenu.Enable("Mute my mic track")
+    else
+        A_TrayMenu.Disable("Mute my mic track")
+    if (MeetingOn && MeetingMuted)
+        A_TrayMenu.Check("Mute my mic track")
+    else
+        A_TrayMenu.Uncheck("Mute my mic track")
+    if (MeetingRetry != "")
+        A_TrayMenu.Enable("Retry failed meeting")
+    else
+        A_TrayMenu.Disable("Retry failed meeting")
+    if (State = "idle")
+        SetIcon("idle")
+}
+
+; Clicking a meeting notice opens the note, or the folder of a failed capture.
+OnTrayNotify(wParam, lParam, msg, hwnd) {
+    global ToastTarget
+    if ((lParam & 0xFFFF) != 0x405 || ToastTarget = "")  ; NIN_BALLOONUSERCLICK
+        return
+    target := ToastTarget
+    ToastTarget := ""
+    if DirExist(target)
+        Run(target)
+    else if FileExist(target) {
+        try Run('"' target '"')
+        catch
+            Run('notepad.exe "' target '"')
+    }
+}
+
+; The program the call is probably in: the active window, or when that is the taskbar or the tray
+; menu (starting from the tray), the next app window down.
+FrontProgram() {
+    try {
+        if !IsShellWindow(WinGetClass("A"))
+            return WinGetProcessName("A")
+    }
+    for hwnd in WinGetList() {  ; top of the z-order first
+        try {
+            if !(WinGetStyle(hwnd) & 0x10000000) || IsShellWindow(WinGetClass(hwnd)) || WinGetTitle(hwnd) = ""
+                continue
+            exe := WinGetProcessName(hwnd)
+            if !InStr(exe, "AutoHotkey")
+                return exe
+        }
+    }
+    return ""
 }
 
 OnScriptExit(reason, code) {
