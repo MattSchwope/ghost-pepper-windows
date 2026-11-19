@@ -484,6 +484,8 @@ class DictationService:
             record.update(
                 screen_names=result.found, screen_near=result.names.zones.get("near", 0), screen_read=_r(result.seconds)
             )
+            if result.focus:
+                record["screen_focus"] = result.focus
         return result
 
     def _log_names(self, dictation_id: int, screen: ScreenResult | None, fixer: NameFix, record: dict[str, Any]) -> None:
@@ -493,10 +495,10 @@ class DictationService:
         if screen is None and not fixer.changed:
             return
         logger.info(
-            "Dictation id=%s screen names status=%s app=%s found=%s (%s) read=%s wait=%.3fs "
+            "Dictation id=%s screen names status=%s app=%s focus=%s found=%s (%s) read=%s wait=%.3fs "
             "fixed=%s (screen=%s near=%s preferred=%s) ambiguous=%s",
             dictation_id, screen.status if screen else "off", (screen.app if screen else "") or "-",
-            screen.found if screen else 0,
+            (screen.focus if screen else "") or "-", screen.found if screen else 0,
             " ".join(f"{zone}={count}" for zone, count in screen.names.zones.items()) if screen and screen.names.zones else "-",
             f"{screen.seconds:.3f}s" if screen and screen.status == "ok" else "-",
             record.get("screen_wait", 0.0), fixer.changed, fixer.from_screen, fixer.from_near, fixer.from_prefer,

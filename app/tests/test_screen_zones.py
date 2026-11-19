@@ -380,3 +380,95 @@ def test_both_people_near_the_cursor_leave_the_word_alone():
     found = extract_names([("near", "Jon Bruno\nJohn Lacio\nHi Jon and John, quick question."), ("title", "Group chat")])
     fix = NameFix(found.words, near=found.near, tiers=found.tiers)
     assert fix("Thanks John.") == "Thanks John." and fix("Thanks Jhon.") == "Thanks Jhon." and fix.ambiguous == 1
+
+
+# -- the real Recruiter tree: Chrome reports the whole page as focused --
+# Observed shape (counts only): window > panes > web document > region "main" > region > list of
+# 23 items; the open conversation is the list item holding the message box, the other items are
+# other people. Chrome often reports the web document itself as focused; the caret is in the box.
+
+def recruiter_inline_window(focus_on="edit"):
+    # Sizes as observed: each other item holds several hundred characters (previews, labels, buttons).
+    preview = "thanks for the update on the search, the hiring manager wants to move quickly on this one " * 6
+    others = [el(name, f"{name} Nov {i + 1}", f"{name}. Message preview: {preview}", "Sent", "Archive", "Mark unread")
+              for i, name in enumerate(["John Lacio", *CONVERSATIONS[:14]])]
+    open_item = el(children=[
+        el("Jonathan Spencer", "Senior Recruiter at Acme"),
+        el("Jonathan Spencer sent the following message at 4:12 PM"),
+        el("oh yeah lol"),
+        el("You sent the following message at 4:15 PM"),
+        el("Hey Jon, I wanted to check on the role."),
+        el("Write a message…", focus=focus_on == "edit"),
+        el("Send"),
+    ])
+    conversation_list = el("Inbox", children=[*others[:6], open_item, *others[6:]])
+    document = el("Home | LinkedIn Talent Solutions", focus=focus_on == "document", children=[
+        el("Recruiter", "Projects", "Jobs", "Inbox", "Reports", far=True),  # banner
+        el(children=[el("Search inbox", "Filters", "Unread"), conversation_list]),  # main
+    ])
+    return el("Home | LinkedIn Talent Solutions - Google Chrome", children=[
+        el("Back", "Forward", "Reload", "Address and search bar", far=True),
+        el(children=[el(children=[document])]),
+    ])
+
+
+def zoned(tree):
+    nodes, focus = flatten(tree)
+    zones = node_zones(nodes, focus)
+    return assemble_parts(nodes, zones), zones
+
+
+def test_recruiter_caret_in_the_message_box_makes_only_the_open_conversation_near():
+    parts, _ = zoned(recruiter_inline_window(focus_on="edit"))
+    near = "\n".join(t for z, t in parts if z == "near")
+    assert "Jonathan Spencer" in near and "oh yeah lol" in near
+    assert "John Lacio" not in near and "Search inbox" not in near and "Projects" not in near
+    found = extract_names(parts)
+    fix = NameFix(found.words, near=found.near, tiers=found.tiers, closeness=found.closeness)
+    assert fix("Hey John, I'm on my way.") == "Hey Jon, I'm on my way."  # Jonathan goes by Jon
+
+
+def test_recruiter_focus_on_the_whole_page_gives_no_near_zone_rather_than_all_of_it():
+    # The logged miss: found=30 (near=30 title=0 page=0 far=0). Now: nothing is near.
+    parts, zones = zoned(recruiter_inline_window(focus_on="document"))
+    assert not any(z == "near" for z, _ in zones) and not any(z == "near" for z, _ in parts)
+    found = extract_names(parts)
+    assert found.zones["near"] == 0 and found.zones["page"] > 0
+
+
+def test_near_is_capped_at_half_the_window():
+    # 0 window > 1 page (focus, holds nearly everything) > 2 list > 3 item ...
+    nodes = [Node(-1, ["Window"]), Node(0, ["Page"]), Node(1, ["x" * 3000]), Node(1, ["y" * 100]), Node(0, ["z" * 100])]
+    assert not any(z == "near" for z, _ in node_zones(nodes, focus=1))
+    assert [z for z, _ in node_zones(nodes, focus=3)] == ["title", "page", "page", "near", "page"]
+
+
+# -- short forms: Jonathan goes by Jon --
+
+def short_form_fix(near_text, page_text=""):
+    found = extract_names([("near", near_text), ("page", page_text)])
+    return NameFix(found.words, near=found.near, tiers=found.tiers, closeness=found.closeness)
+
+
+@pytest.mark.parametrize(
+    "near, heard, wanted",
+    [
+        ("Jonathan Spencer\nJonathan Spencer sent a message", "Hey John, I'm on it.", "Hey Jon, I'm on it."),
+        ("Jonathon Price wrote", "Thanks John.", "Thanks Jon."),
+        ("Johnathan Reyes\nJohnathan Reyes sent a message", "Thanks Jon.", "Thanks John."),
+        ("Zachary Pike\nZachary Pike sent a message", "Thanks Zack.", "Thanks Zach."),
+        ("Geoffrey Lin\nGeoffrey Lin sent a message", "Thanks Jeff.", "Thanks Geoff."),
+        ("Kristopher Dale\nKristopher Dale sent a message", "Thanks Chris.", "Thanks Kris."),
+        # never expanded to the long name, and nicknames that are other names stay apart
+        ("Jonathan Spencer\nJonathan Spencer sent a message", "Thanks Jon.", "Thanks Jon."),
+        ("Jonathan Spencer\nJonathan Spencer sent a message", "Thanks Jonathan.", "Thanks Jonathan."),
+        ("William Hart\nWilliam Hart sent a message", "Thanks Bill.", "Thanks Bill."),
+    ],
+)
+def test_short_forms_of_a_near_long_name(near, heard, wanted):
+    assert short_form_fix(near, "John Lacio\nJohn Lacio. Message preview: hi")(heard) == wanted
+
+
+def test_short_forms_only_come_from_near_names():
+    fix = short_form_fix("Priya Raman\nPriya Raman sent a message", "Jonathan Spencer\nJonathan Spencer")
+    assert fix("Thanks John.") == "Thanks John." and fix.changed == 0

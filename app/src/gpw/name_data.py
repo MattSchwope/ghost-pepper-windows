@@ -456,3 +456,16 @@ def variant_groups() -> dict[str, frozenset[int]]:
         for name in line.split():
             groups.setdefault(name.casefold(), set()).add(number)
     return {name: frozenset(lines) for name, lines in groups.items()}
+
+
+# Long first names whose usual short form has competing spellings: the long form on screen says
+# which one this person uses (Jonathan goes by Jon, Johnathan by John). Used only for names near
+# the cursor, and only to pick a short form's spelling: a short form is never expanded to the long
+# name, and nicknames that are other names (Bill and William) are not here.
+SHORT_FORMS = {
+    "jonathan": "Jon", "jonathon": "Jon", "johnathan": "John", "johnathon": "John",
+    "zachary": "Zach", "zachery": "Zach", "zachariah": "Zach", "zackary": "Zack", "zackery": "Zack",
+    "christopher": "Chris", "kristopher": "Kris",
+    "jeffrey": "Jeff", "jeffery": "Jeff", "geoffrey": "Geoff",
+    "matthew": "Matt",
+}

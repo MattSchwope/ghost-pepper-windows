@@ -217,3 +217,28 @@ def test_recruiter_inbox_john_does_not_block_the_open_conversations_jon(make_ser
     assert dictate(service).text == "Hi Jon, thanks for getting back to me."
     assert engine.calls[0]["keywords"][0] == "Jon Bruno"
     assert "fixed=1 (screen=1 near=0 preferred=0) ambiguous=0" in caplog.text
+
+
+@pytest.mark.parametrize("focus_on, how, pasted", [
+    ("edit", "caret", "Hey Jon, I'm on my way."),  # the caret found in the message box: Jonathan goes by Jon
+    ("document", "page", "Hey John, I'm on my way."),  # focus was the whole page: no near zone, John Lacio stays
+])
+def test_recruiter_logs_how_the_focus_was_found(make_service, caplog, focus_on, how, pasted):
+    from test_screen_zones import assemble_parts, flatten, node_zones, recruiter_inline_window
+
+    class Recruiter:
+        app, title, focus = "chrome.exe", "Home | LinkedIn Talent Solutions - Google Chrome", ""
+
+        def parts(self):
+            nodes, focus = flatten(recruiter_inline_window(focus_on=focus_on))
+            self.focus = how
+            return assemble_parts(nodes, node_zones(nodes, focus))
+
+    caplog.set_level(logging.INFO)
+    service = make_service(engine=FakeEngine(text="Hey John, I'm on my way."),
+                           screen=ScreenReader(lambda: FakeWindowReader(Recruiter())))
+    result = dictate(service)
+    assert result.text == pasted
+    assert f"app=chrome.exe focus={how} found=" in caplog.text
+    service.pasted(result.dictation_id, 1500, 40, True)
+    assert latency_records(service)[-1]["screen_focus"] == how

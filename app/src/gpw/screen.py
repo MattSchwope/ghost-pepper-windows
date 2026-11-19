@@ -50,6 +50,7 @@ class ScreenResult:
     app: str = ""
     names: ScreenNames = field(default_factory=ScreenNames)
     seconds: float = 0.0
+    focus: str = ""  # field | caret | page | none (see UIAWindowReader.window_parts); "" if not known
 
     @property
     def found(self) -> int:
@@ -172,12 +173,17 @@ class ScreenReader:
             return ScreenResult("error", app=window.app, seconds=time.perf_counter() - started)
         names = extract_names(parts, self.max_names)
         del parts  # only the names leave this function
-        return ScreenResult("ok", app=window.app, names=names, seconds=time.perf_counter() - started)
+        focus = getattr(window, "focus", "")
+        return ScreenResult("ok", app=window.app, names=names, seconds=time.perf_counter() - started, focus=focus)
 
 
 # -- zones: which part of the window each piece of text sits in --
 
 NEAR_MIN_CHARS = 400  # grow the near zone outward from the focus until it holds this much text
+# Near never holds more than this share of the window's text. When the focus is the whole page
+# (Chrome often reports its web document as focused), there is no near zone rather than all of it.
+NEAR_MAX_SHARE = 0.5
+NEAR_SHARE_MIN_TEXT = 2_000  # a window with less text than this is small enough not to need the cap
 ZONE_ORDER = {zone: i for i, zone in enumerate(ZONES)}
 
 
@@ -195,8 +201,10 @@ def node_zones(nodes: list[Node], focus: int, near_min_chars: int = NEAR_MIN_CHA
     before the node is inside: 0 is the focused element itself, 1 its parent's other children, and so on.
 
     The near zone is rings 0 to K, where K is the first ring at which the text so far (outside far
-    parts) reaches near_min_chars. It never takes in the whole window. The window's own text (its
-    title) is the title zone. Without a focused element, everything is page or far.
+    parts) reaches near_min_chars. It never takes in the whole window, nor a ring that would put
+    more than NEAR_MAX_SHARE of the window's text in it; if the focused element alone holds that
+    much, there is no near zone. The window's own text (its title) is the title zone. Without a
+    focused element, everything is page or far.
     """
     n = len(nodes)
     if not 0 <= focus < n:
@@ -219,17 +227,20 @@ def node_zones(nodes: list[Node], focus: int, near_min_chars: int = NEAR_MIN_CHA
     for i, node in enumerate(nodes):
         if not node.far and i != 0:
             chars[ring[i]] += sum(len(t) for t in node.text)
-    near, total = 0, 0
-    for near in range(top):
-        total += chars[near]
+    whole = sum(chars)
+    near, total = -1, 0
+    for k in range(top):
+        total += chars[k]
+        if whole >= NEAR_SHARE_MIN_TEXT and total > NEAR_MAX_SHARE * whole:
+            break  # this ring would make "near" most of the window
+        near = k
         if total >= near_min_chars:
             break
-    near = min(near, max(top - 1, 0))
     zones: list[tuple[str, int]] = []
     for i, node in enumerate(nodes):
         if i == 0:
             zones.append(("title", 0))
-        elif ring[i] <= near and top > 0:
+        elif ring[i] <= near:
             zones.append(("near", ring[i]))
         elif node.far:
             zones.append(("far", ring[i]))
@@ -275,9 +286,11 @@ class UIAWindow:
         self._hwnd = hwnd
         self.app = app
         self.title = title
+        self.focus = ""
 
     def parts(self) -> list[tuple[str, str]]:
-        return self._reader.window_parts(self._hwnd)
+        parts, self.focus = self._reader.window_parts(self._hwnd)
+        return parts
 
     def text(self) -> str:
         return "\n".join(text for _, text in self.parts())
@@ -350,23 +363,41 @@ class UIAWindowReader:
             return isinstance(label, str) and label.casefold() in FAR_CUSTOM_LANDMARKS
         return False
 
-    def _focus_id(self) -> tuple | None:
+    def _focus_ids(self) -> tuple[tuple | None, tuple | None]:
+        """(focused element, element holding the caret). Chrome often reports its whole web document
+        as focused while you type in a message box; the caret then says which box."""
         try:
             focused = self._uia.GetFocusedElement()
-            return tuple(focused.GetRuntimeId()) if focused is not None else None
+            focus_id = tuple(focused.GetRuntimeId()) if focused is not None else None
         except Exception:
-            return None
+            return None, None
+        caret_id = None
+        try:
+            if focused.CurrentControlType == UIA_DocumentControlTypeId:
+                m = self._m
+                pattern = focused.GetCurrentPattern(m.UIA_TextPattern2Id)
+                if pattern:
+                    _, caret = pattern.QueryInterface(m.IUIAutomationTextPattern2).GetCaretRange()
+                    holder = caret.GetEnclosingElement() if caret else None
+                    if holder is not None:
+                        caret_id = tuple(holder.GetRuntimeId())
+        except Exception:
+            caret_id = None  # no caret (nothing being typed), or no TextPattern2
+        return focus_id, (caret_id if caret_id != focus_id else None)
 
-    def window_parts(self, hwnd: int) -> list[tuple[str, str]]:
-        """The window's text in zones (see node_zones). Password fields are skipped."""
+    def window_parts(self, hwnd: int) -> tuple[list[tuple[str, str]], str]:
+        """The window's text in zones (see node_zones), and how the focus was found:
+        field (the focused element), caret (the element holding the caret inside a focused page),
+        page (the focus was most of the window, so no near zone), none (not in this window).
+        Password fields are skipped."""
         m = self._m
-        focus_id = self._focus_id()
+        focus_id, caret_id = self._focus_ids()
         root = self._uia.ElementFromHandleBuildCache(hwnd, self._cache)
         if root is None:
-            return []
+            return [], "none"
         nodes: list[Node] = []
         readable: list[tuple[int, object]] = []  # documents and edit fields, read through TextPattern later
-        focus = -1
+        focus = caret = -1
         size = 0
         stack: list[tuple[object, int, bool]] = [(root, -1, False)]
         while stack and len(nodes) < MAX_ELEMENTS:
@@ -385,10 +416,14 @@ class UIAWindowReader:
                     if isinstance(value, str) and value and value != name:
                         text.append(value)
                     size += sum(len(t) for t in text)
-                if focus < 0 and focus_id is not None:
+                if (focus < 0 and focus_id is not None) or (caret < 0 and caret_id is not None):
                     runtime_id = element.GetCachedPropertyValue(UIA_RuntimeIdPropertyId)
-                    if runtime_id is not None and tuple(runtime_id) == focus_id:
-                        focus = len(nodes)
+                    if runtime_id is not None:
+                        runtime_id = tuple(runtime_id)
+                        if runtime_id == focus_id:
+                            focus = len(nodes)
+                        elif runtime_id == caret_id:
+                            caret = len(nodes)
                 if kind in (UIA_DocumentControlTypeId, UIA_EditControlTypeId) and element.GetCachedPropertyValue(
                     UIA_IsTextPatternAvailablePropertyId
                 ):
@@ -401,7 +436,11 @@ class UIAWindowReader:
             count = children.Length if children else 0
             for j in reversed(range(count)):
                 stack.append((children.GetElement(j), index, far))
+        how = "caret" if caret >= 0 else "field" if focus >= 0 else "none"
+        focus = caret if caret >= 0 else focus
         zones = node_zones(nodes, focus)
+        if focus >= 0 and not any(zone == "near" for zone, _ in zones):
+            how = "page"
         # Documents and edit fields hold text their children do not show (a reply's quoted email).
         # Nearest first, at most MAX_TEXT_READS. Skip the focus's outer containers: in a browser that
         # is the whole page again, which would pull the sidebar and nav into the near rings.
@@ -427,4 +466,4 @@ class UIAWindowReader:
             if body:
                 nodes[index].text.append(body)
                 size += len(body)
-        return assemble_parts(nodes, zones)
+        return assemble_parts(nodes, zones), how

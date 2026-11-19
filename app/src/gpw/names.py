@@ -22,7 +22,7 @@ from typing import Sequence
 from difflib import SequenceMatcher
 from functools import lru_cache
 
-from .name_data import COMMON_WORDS, variant_groups
+from .name_data import COMMON_WORDS, SHORT_FORMS, variant_groups
 
 SIMILARITY = 0.55
 LIGHT_SYLLABLE_SIMILARITY = 0.7  # stricter when the first vowels differ (Lamont, Lemonte)
@@ -458,8 +458,17 @@ class NameFix:
         self._preferred = {v.casefold() for v in self._prefer.values()}
         self._exact = {w.casefold() for w in self.screen_words}
         self._near_words = {w for name in self.near for w in name.split()}
+        # Jonathan near the cursor goes by Jon: a heard "John" takes that spelling (name_data.SHORT_FORMS).
+        self.tiers, self.closeness = dict(self.tiers), dict(self.closeness)
+        for long in list(self._near_words):
+            short = SHORT_FORMS.get(long.casefold())
+            if short and short not in self._near_words:
+                self._near_words.add(short)
+                self.tiers.setdefault(short, self.tiers.get(long, 0))
+                self.closeness.setdefault(short, self.closeness.get(long, 1_000_000))
         self._near_names = sorted(
-            {n for n in self.near | self._near_words if n and is_name_word(n.split()[0]) and not n.isupper()}
+            {n for n in self.near | {w for name in self.near for w in name.split()}  # not the derived short forms
+             if n and is_name_word(n.split()[0]) and not n.isupper()}
         )
 
     @property
