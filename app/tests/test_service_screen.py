@@ -46,7 +46,7 @@ def test_screen_names_go_first_and_respell_the_transcript(make_service, caplog):
     record = latency_records(service)[-1]
     assert record["screen"] == "ok" and record["screen_app"] == "OUTLOOK.EXE"
     assert record["screen_names"] >= 2 and record["names_fixed"] == 3 and record["screen_wait"] < 0.1
-    assert "screen names status=ok app=OUTLOOK.EXE" in caplog.text and "fixed=3 (screen=3 preferred=0)" in caplog.text
+    assert "screen names status=ok app=OUTLOOK.EXE" in caplog.text and "fixed=3 (screen=3 near=0 preferred=0)" in caplog.text
     assert service.health()["screen_names"] is True
 
 
@@ -155,3 +155,31 @@ def test_screen_names_setting_parses(off, tmp_path):
     skip = make_config(tmp_path, dictation={"screen_names_skip": ["Chase", "KeePass.exe"]}).dictation.screen_names_skip
     assert skip == ("Chase", "KeePass.exe")
     assert "1Password.exe" in make_config(tmp_path).dictation.screen_names_skip
+
+
+def test_linkedin_reply_gets_the_mumbled_name_from_the_open_conversation(make_service, caplog):
+    # The real failure: replying to Lemonte Pegues on LinkedIn in Chrome pasted "Lamont, ...".
+    from test_screen_zones import CONVERSATIONS, MESSAGE, assemble_parts, flatten, linkedin_window, node_zones
+
+    class LinkedIn:
+        app, title = "chrome.exe", "Messaging | LinkedIn - Google Chrome"
+
+        def parts(self):
+            nodes, focus = flatten(linkedin_window())
+            return assemble_parts(nodes, node_zones(nodes, focus))
+
+    caplog.set_level(logging.INFO)
+    engine = FakeEngine(text="Lemon Tay, somehow this slipped past me. Lamont, thanks.")
+    service = make_service(engine=engine, screen=ScreenReader(lambda: FakeWindowReader(LinkedIn())))
+    result = dictate(service)
+
+    assert result.text == "Lemonte, somehow this slipped past me. Lemonte, thanks."
+    keywords = engine.calls[0]["keywords"]
+    assert keywords[0] == "Lemonte Pegues" and not set(keywords[:4]) & set(CONVERSATIONS)
+    assert "found=30 (near=4 title=0 page=26 far=0)" in caplog.text
+    assert "fixed=2 (screen=1 near=1 preferred=0)" in caplog.text
+    for private in ["Lemonte", "Pegues", "roadmap", MESSAGE[:20]]:
+        assert private not in caplog.text
+    service.pasted(result.dictation_id, 1500, 40, True)
+    record = latency_records(service)[-1]
+    assert record["screen_near"] == 4 and record["names_fixed"] == 2

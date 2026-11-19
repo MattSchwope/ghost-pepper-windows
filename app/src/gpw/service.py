@@ -415,7 +415,8 @@ class DictationService:
         c = self.config.cleanup
         words = self.dictionary.current() if self.dictionary else None
         seen = frozenset(screen.names.words) if screen is not None else frozenset()
-        fixer = NameFix(set(seen), words.prefer if words else {})
+        near = set(screen.names.near) if screen is not None else set()
+        fixer = NameFix(set(seen), words.prefer if words else {}, near=near)
         snippet = self._find_snippet(raw_text, words.replace if words else {})
         if snippet is not None:
             text = snippet.text
@@ -478,7 +479,9 @@ class DictationService:
         if result.app:
             record["screen_app"] = result.app
         if result.status == "ok":
-            record.update(screen_names=result.found, screen_read=_r(result.seconds))
+            record.update(
+                screen_names=result.found, screen_near=result.names.zones.get("near", 0), screen_read=_r(result.seconds)
+            )
         return result
 
     def _log_names(self, dictation_id: int, screen: ScreenResult | None, fixer: NameFix, record: dict[str, Any]) -> None:
@@ -488,12 +491,14 @@ class DictationService:
         if screen is None and not fixer.changed:
             return
         logger.info(
-            "Dictation id=%s screen names status=%s app=%s found=%s read=%s wait=%.3fs "
-            "fixed=%s (screen=%s preferred=%s) ambiguous=%s",
+            "Dictation id=%s screen names status=%s app=%s found=%s (%s) read=%s wait=%.3fs "
+            "fixed=%s (screen=%s near=%s preferred=%s) ambiguous=%s",
             dictation_id, screen.status if screen else "off", (screen.app if screen else "") or "-",
             screen.found if screen else 0,
+            " ".join(f"{zone}={count}" for zone, count in screen.names.zones.items()) if screen and screen.names.zones else "-",
             f"{screen.seconds:.3f}s" if screen and screen.status == "ok" else "-",
-            record.get("screen_wait", 0.0), fixer.changed, fixer.from_screen, fixer.from_prefer, fixer.ambiguous,
+            record.get("screen_wait", 0.0), fixer.changed, fixer.from_screen, fixer.from_near, fixer.from_prefer,
+            fixer.ambiguous,
         )
         if self.config.debug_log_transcripts:
             if screen is not None and screen.names.names:

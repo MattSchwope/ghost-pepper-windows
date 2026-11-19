@@ -8,6 +8,14 @@ slow window costs at most that deadline, never a full read.
 
 Skipped: apps in dictation.screen_names_skip (by program name, or a word in the window title),
 password fields, and anything UI Automation cannot read (remote desktop, images, scanned PDFs).
+
+Zones (closest to the cursor first, see UIAWindowReader.window_parts):
+  near   the focused field and the panes around it: the conversation or email being answered,
+         its header, To and Subject. Grown outward from the focus until it holds NEAR_MIN_CHARS.
+  title  the window title.
+  page   everything else, in rings by how far out from the focus it sits.
+  far    toolbars, menus, tab strips, folder trees, nav bars, sidebars and page banners.
+Only counts per zone are logged, never the names or the text.
 """
 
 from __future__ import annotations
@@ -23,7 +31,7 @@ from typing import Callable, Protocol
 
 from .autolearn import process_name
 from .config import SCREEN_NAMES_SKIP
-from .names import ScreenNames, extract_names
+from .names import ZONES, ScreenNames, extract_names
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,9 @@ class ScreenResult:
 
 
 class Window(Protocol):
+    """A window to read. parts() gives (zone, text) pairs, closest to the cursor first;
+    a window with only text() is read as one "page" zone."""
+
     app: str
     title: str
 
@@ -154,22 +165,104 @@ class ScreenReader:
         if skipped(window.app, window.title, self.skip):
             return ScreenResult("skipped", app=window.app, seconds=time.perf_counter() - started)
         try:
-            text = window.text()
+            parts = window.parts() if hasattr(window, "parts") else [("page", window.text())]
         except Exception as exc:
             logger.debug("Screen names: could not read %s (%s)", window.app, type(exc).__name__)
             return ScreenResult("error", app=window.app, seconds=time.perf_counter() - started)
-        names = extract_names(text, self.max_names)
-        del text  # only the names leave this function
+        names = extract_names(parts, self.max_names)
+        del parts  # only the names leave this function
         return ScreenResult("ok", app=window.app, names=names, seconds=time.perf_counter() - started)
+
+
+# -- zones: which part of the window each piece of text sits in --
+
+NEAR_MIN_CHARS = 400  # grow the near zone outward from the focus until it holds this much text
+ZONE_ORDER = {zone: i for i, zone in enumerate(ZONES)}
+
+
+@dataclass
+class Node:
+    """One element of a window's tree, in document order (a parent comes before its children)."""
+
+    parent: int  # index of the parent node; -1 for the window itself
+    text: list[str] = field(default_factory=list)
+    far: bool = False  # in a toolbar, menu, tab strip, folder tree, nav bar, sidebar or banner
+
+
+def node_zones(nodes: list[Node], focus: int, near_min_chars: int = NEAR_MIN_CHARS) -> list[tuple[str, int]]:
+    """(zone, ring) for each node. The ring is how many levels up from the focused element you go
+    before the node is inside: 0 is the focused element itself, 1 its parent's other children, and so on.
+
+    The near zone is rings 0 to K, where K is the first ring at which the text so far (outside far
+    parts) reaches near_min_chars. It never takes in the whole window. The window's own text (its
+    title) is the title zone. Without a focused element, everything is page or far.
+    """
+    n = len(nodes)
+    if not 0 <= focus < n:
+        return [("title", 0) if i == 0 else ("far" if node.far else "page", 0) for i, node in enumerate(nodes)]
+    path: dict[int, int] = {}
+    i, k = focus, 0
+    while i >= 0 and i not in path:
+        path[i] = k
+        i, k = nodes[i].parent, k + 1
+    top = max(path.values())  # the window itself
+    ring = [0] * n
+    for i, node in enumerate(nodes):
+        if i in path:
+            ring[i] = path[i]
+        elif 0 <= node.parent < i:
+            ring[i] = ring[node.parent]
+        else:
+            ring[i] = top
+    chars = [0] * (top + 1)
+    for i, node in enumerate(nodes):
+        if not node.far and i != 0:
+            chars[ring[i]] += sum(len(t) for t in node.text)
+    near, total = 0, 0
+    for near in range(top):
+        total += chars[near]
+        if total >= near_min_chars:
+            break
+    near = min(near, max(top - 1, 0))
+    zones: list[tuple[str, int]] = []
+    for i, node in enumerate(nodes):
+        if i == 0:
+            zones.append(("title", 0))
+        elif ring[i] <= near and top > 0:
+            zones.append(("near", ring[i]))
+        elif node.far:
+            zones.append(("far", ring[i]))
+        else:
+            zones.append(("page", ring[i]))
+    return zones
+
+
+def assemble_parts(nodes: list[Node], zones: list[tuple[str, int]]) -> list[tuple[str, str]]:
+    """The window's text as (zone, text) parts, closest to the cursor first: near, title, page rings outward, far."""
+    buckets: dict[tuple[int, int], list[str]] = {}
+    for node, (zone, ring) in zip(nodes, zones):
+        if node.text:
+            order = (ZONE_ORDER[zone], ring if zone == "page" else 0)
+            buckets.setdefault(order, []).extend(node.text)
+    return [(ZONES[order[0]], "\n".join(texts)) for order, texts in sorted(buckets.items())]
 
 
 # -- Windows UI Automation --
 
+UIA_RuntimeIdPropertyId = 30000
 UIA_IsTextPatternAvailablePropertyId = 30040
 UIA_ValueValuePropertyId = 30045
+UIA_LandmarkTypePropertyId = 30157
+UIA_LocalizedLandmarkTypePropertyId = 30158
 UIA_DocumentControlTypeId = 50030
 UIA_EditControlTypeId = 50004
-TreeScope_Descendants = 4
+TreeScope_Subtree = 7
+# Menus, menu bars, status bars, toolbars, tab items, trees (folder panes), title bars.
+FAR_CONTROL_TYPES = {50009, 50010, 50017, 50019, 50021, 50023, 50037}
+UIA_NavigationLandmarkTypeId = 80004
+UIA_SearchLandmarkTypeId = 80005
+UIA_CustomLandmarkTypeId = 80000
+FAR_CUSTOM_LANDMARKS = {"complementary", "banner", "content information", "contentinfo"}
 
 
 class UIAWindow:
@@ -179,8 +272,11 @@ class UIAWindow:
         self.app = app
         self.title = title
 
+    def parts(self) -> list[tuple[str, str]]:
+        return self._reader.window_parts(self._hwnd)
+
     def text(self) -> str:
-        return self._reader.window_text(self._hwnd)
+        return "\n".join(text for _, text in self.parts())
 
 
 class UIAWindowReader:
@@ -205,12 +301,21 @@ class UIAWindowReader:
             uia2.TransactionTimeout = UIA_TIMEOUT_MS
         except Exception:
             pass
+        # One cross-process call caches the whole tree (control view) with these properties.
         cache = self._uia.CreateCacheRequest()
         for prop in (
             uia.UIA_NamePropertyId, uia.UIA_IsPasswordPropertyId, uia.UIA_ControlTypePropertyId,
-            UIA_ValueValuePropertyId, UIA_IsTextPatternAvailablePropertyId,
+            UIA_ValueValuePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_RuntimeIdPropertyId,
         ):
             cache.AddProperty(prop)
+        self._landmarks = True
+        try:  # Windows 10 1703 and later
+            cache.AddProperty(UIA_LandmarkTypePropertyId)
+            cache.AddProperty(UIA_LocalizedLandmarkTypePropertyId)
+        except Exception:
+            self._landmarks = False
+        cache.TreeScope = TreeScope_Subtree
+        cache.TreeFilter = self._uia.ControlViewCondition
         self._cache = cache
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
 
@@ -228,46 +333,94 @@ class UIAWindowReader:
         u.GetWindowTextW(wintypes.HWND(hwnd), buf, len(buf))
         return UIAWindow(self, hwnd, process_name(pid.value), buf.value)
 
-    def window_text(self, hwnd: int) -> str:
+    def _is_far(self, element: object, kind: int) -> bool:
+        if kind in FAR_CONTROL_TYPES:
+            return True
+        if not self._landmarks:
+            return False
+        landmark = element.GetCachedPropertyValue(UIA_LandmarkTypePropertyId)
+        if landmark in (UIA_NavigationLandmarkTypeId, UIA_SearchLandmarkTypeId):
+            return True
+        if landmark == UIA_CustomLandmarkTypeId:
+            label = element.GetCachedPropertyValue(UIA_LocalizedLandmarkTypePropertyId)
+            return isinstance(label, str) and label.casefold() in FAR_CUSTOM_LANDMARKS
+        return False
+
+    def _focus_id(self) -> tuple | None:
+        try:
+            focused = self._uia.GetFocusedElement()
+            return tuple(focused.GetRuntimeId()) if focused is not None else None
+        except Exception:
+            return None
+
+    def window_parts(self, hwnd: int) -> list[tuple[str, str]]:
+        """The window's text in zones (see node_zones). Password fields are skipped."""
         m = self._m
-        root = self._uia.ElementFromHandle(hwnd)
+        focus_id = self._focus_id()
+        root = self._uia.ElementFromHandleBuildCache(hwnd, self._cache)
         if root is None:
-            return ""
-        found = root.FindAllBuildCache(TreeScope_Descendants, self._uia.ControlViewCondition, self._cache)
-        parts: list[str] = []
+            return []
+        nodes: list[Node] = []
+        readable: list[tuple[int, object]] = []  # documents and edit fields, read through TextPattern later
+        focus = -1
         size = 0
-        text_reads = 0
-        count = min(found.Length if found else 0, MAX_ELEMENTS)
-        for i in range(count):
-            if size > MAX_SCREEN_CHARS:
-                break
-            element = found.GetElement(i)
+        stack: list[tuple[object, int, bool]] = [(root, -1, False)]
+        while stack and len(nodes) < MAX_ELEMENTS:
+            element, parent, far = stack.pop()
             try:
                 if element.CachedIsPassword:
                     continue
-                name = element.CachedName
-                if name:
-                    parts.append(name)
-                    size += len(name)
-                value = element.GetCachedPropertyValue(UIA_ValueValuePropertyId)
-                if isinstance(value, str) and value and value != name:
-                    parts.append(value)
-                    size += len(value)
                 kind = element.CachedControlType
-                if (
-                    text_reads < MAX_TEXT_READS
-                    and kind in (UIA_DocumentControlTypeId, UIA_EditControlTypeId)
-                    and element.GetCachedPropertyValue(UIA_IsTextPatternAvailablePropertyId)
+                far = far or self._is_far(element, kind)
+                text: list[str] = []
+                if size < MAX_SCREEN_CHARS:
+                    name = element.CachedName
+                    if name:
+                        text.append(name)
+                    value = element.GetCachedPropertyValue(UIA_ValueValuePropertyId)
+                    if isinstance(value, str) and value and value != name:
+                        text.append(value)
+                    size += sum(len(t) for t in text)
+                if focus < 0 and focus_id is not None:
+                    runtime_id = element.GetCachedPropertyValue(UIA_RuntimeIdPropertyId)
+                    if runtime_id is not None and tuple(runtime_id) == focus_id:
+                        focus = len(nodes)
+                if kind in (UIA_DocumentControlTypeId, UIA_EditControlTypeId) and element.GetCachedPropertyValue(
+                    UIA_IsTextPatternAvailablePropertyId
                 ):
-                    pattern = element.GetCurrentPattern(m.UIA_TextPatternId)
-                    if pattern:
-                        text_reads += 1
-                        body = pattern.QueryInterface(m.IUIAutomationTextPattern).DocumentRange.GetText(
-                            MAX_SCREEN_CHARS - size
-                        )
-                        if body:
-                            parts.append(body)
-                            size += len(body)
+                    readable.append((len(nodes), element))
+                children = element.GetCachedChildren()
             except Exception:
                 continue
-        return "\n".join(parts)
+            index = len(nodes)
+            nodes.append(Node(parent, text, far))
+            count = children.Length if children else 0
+            for j in reversed(range(count)):
+                stack.append((children.GetElement(j), index, far))
+        zones = node_zones(nodes, focus)
+        # Documents and edit fields hold text their children do not show (a reply's quoted email).
+        # Nearest first, at most MAX_TEXT_READS. Skip the focus's outer containers: in a browser that
+        # is the whole page again, which would pull the sidebar and nav into the near rings.
+        path = set()
+        i = focus
+        while i >= 0 and i not in path:
+            path.add(i)
+            i = nodes[i].parent
+        reads = 0
+        for index, element in sorted(readable, key=lambda r: (ZONE_ORDER[zones[r[0]][0]], zones[r[0]][1])):
+            if reads >= MAX_TEXT_READS or size >= MAX_SCREEN_CHARS:
+                break
+            if index in path and zones[index][0] != "near":
+                continue
+            try:
+                pattern = element.GetCurrentPattern(m.UIA_TextPatternId)
+                if not pattern:
+                    continue
+                reads += 1
+                body = pattern.QueryInterface(m.IUIAutomationTextPattern).DocumentRange.GetText(MAX_SCREEN_CHARS - size)
+            except Exception:
+                continue
+            if body:
+                nodes[index].text.append(body)
+                size += len(body)
+        return assemble_parts(nodes, zones)

@@ -443,6 +443,9 @@ well were what when where which while who why will window with without word work
 yesterday yet you your yours
 outlook gmail google chrome edge firefox safari slack linkedin zoom webex excel powerpoint onenote onedrive sharepoint
 windows teams word copilot notepad
+senior junior manager management program project product director engineer engineering recruiter recruiting lead
+principal specialist president vice chief officer consultant analyst associate coordinator executive founder partner
+emoji keyboard gif premium business conversation conversations
 """.split())
 
 
