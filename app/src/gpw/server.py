@@ -10,6 +10,11 @@ Endpoints:
   POST /dictionary/add  the add-word hotkey: word=<selected text> (JSON)
   POST /recent   the last 10 dictations, newest first, for the recent window and paste_last (text/plain,
                  see recent.render_recent). A POST, so it needs the client header: a web page cannot read it.
+  POST /meeting/start   start meeting capture; app=<program in front> (JSON)
+  POST /meeting/stop    stop it; the note is written in the background (JSON)
+  POST /meeting/mute    on=1 or on=0: mute or unmute the mic track (JSON)
+  POST /meeting/retry   folder=<name>, or the last failed capture: process it again (JSON)
+  POST /meeting/status  capture state, elapsed time, and the last note or failure (JSON)
 
 POSTs must carry the X-GPW-Client header and no Origin header, so a web page
 cannot start the mic: browsers add Origin to cross-site requests and cannot add
@@ -26,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .meeting import MeetingBusy, NotCapturing
+from .meeting_capture import CaptureError
 from .mic import MicError
 from .recent import render_recent
 from .service import DictationService, ServiceBusy
@@ -120,6 +127,8 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                 elif path == "/recent":
                     body = render_recent(service.recent.newest_first()).encode("utf-8")
                     self._send(200, body, "text/plain; charset=utf-8")
+                elif path.startswith("/meeting/"):
+                    self._meeting(path.removeprefix("/meeting/"), form)
                 else:
                     self._json(404, {"ok": False, "error": "Not found."})
             except Exception as exc:
@@ -134,6 +143,33 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
             except MicError as exc:
                 logger.error("Mic error: %s", exc)
                 self._json(503, {"ok": False, "error": str(exc)})
+
+        def _meeting(self, action: str, form: dict[str, list[str]]) -> None:
+            meetings = service.meetings
+            if meetings is None:
+                self._json(404, {"ok": False, "error": "Meeting capture is not available."})
+                return
+            try:
+                if action == "start":
+                    result = meetings.start(form.get("app", [""])[0][:100])
+                elif action == "stop":
+                    result = meetings.stop("hotkey")
+                elif action == "mute":
+                    result = {"muted": meetings.set_mute(form.get("on", ["1"])[0] == "1")}
+                elif action == "retry":
+                    result = {"folder": meetings.retry(form.get("folder", [""])[0])}
+                elif action == "status":
+                    result = meetings.status()
+                else:
+                    self._json(404, {"ok": False, "error": "Not found."})
+                    return
+                self._json(200, {"ok": True, **result})
+            except (MeetingBusy, NotCapturing) as exc:
+                self._json(409, {"ok": False, "error": str(exc)})
+            except CaptureError as exc:
+                self._json(503, {"ok": False, "error": str(exc)})
+            except (FileNotFoundError, ValueError) as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
 
         def _add_word(self, word: str) -> None:
             try:

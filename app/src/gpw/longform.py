@@ -70,6 +70,44 @@ def render_timestamped(segments: list[tuple[float, str]]) -> str:
     return body.rstrip() + "\n"
 
 
+class ChunkCache:
+    """Finished chunk text in a work folder, one file per chunk, so a failed run resumes without
+    paying for the chunks that already came back. Shared by file transcription and meetings."""
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self.hits = 0
+
+    def path(self, name: str) -> Path:
+        safe = re.sub(r"[^\w.-]+", "_", name)  # outside the f-string: Python 3.11 allows no backslash there
+        return self.folder / f"{safe}.txt"
+
+    def get(self, name: str) -> str | None:
+        path = self.path(name)
+        if not path.is_file():
+            return None
+        self.hits += 1
+        return path.read_text(encoding="utf-8")
+
+    def put(self, name: str, text: str) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        tmp = self.path(name).with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(self.path(name))
+
+
+def transcribe_chunk(engine: Engine, path: Path, prompt: str | None, keywords: list[str], languages: list[str]) -> tuple[str, bool]:
+    """One request. If OpenAI refuses the dictionary hints (the keyword cap is untested), try once
+    without them. Returns (text, whether the hints were dropped)."""
+    try:
+        return engine.transcribe(path, prompt, keywords, languages), False
+    except Exception as exc:
+        if type(exc).__name__ != "BadRequestError" or not keywords:
+            raise
+    logger.warning("OpenAI refused the request with %s dictionary hints; retrying without them", len(keywords))
+    return engine.transcribe(path, prompt, [], languages), True
+
+
 def work_key(src: Path, size: int, mtime_ns: int, model: str, prep: str, chunk_minutes: int) -> str:
     """Cache key: a changed file or setting gets a fresh work folder."""
     key = f"{src.name}-{size}-{mtime_ns}-{model}-{prep}-{chunk_minutes}m"
@@ -119,17 +157,17 @@ def transcribe_file(
     logger.info("Plan chunks=%s est_cost=%s", len(spans), f"${cost:.3f}" if cost is not None else "unknown")
 
     transcript = Transcript(duration=duration)
+    cache = ChunkCache(work)
     previous = ""
     for i, (start, end) in enumerate(spans):
-        cache = work / f"chunk_{i:03d}.txt"
-        if cache.is_file():
-            text = cache.read_text(encoding="utf-8")
+        text = cache.get(f"chunk_{i:03d}")
+        if text is not None:
             logger.info("Chunk %s/%s cached", i + 1, len(spans))
         else:
             mp3 = work / f"chunk_{i:03d}.mp3"
             audio.export_chunk(ff, wav, start, end, mp3)
             text = engine.transcribe(mp3, build_prompt(context, previous), keywords, languages)
-            cache.write_text(text, encoding="utf-8")
+            cache.put(f"chunk_{i:03d}", text)
             logger.info("Chunk %s/%s %s-%s done", i + 1, len(spans), fmt_ts(start), fmt_ts(end))
         transcript.segments.append((start, text))
         previous = text

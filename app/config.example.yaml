@@ -38,6 +38,7 @@ hotkeys:
                            # the right one is the dictate key.
   recent: "^!h"            # Ctrl+Alt+H: the last 10 dictations with copy buttons ("" turns it off)
   paste_last: "^!l"        # Ctrl+Alt+L: paste the latest dictation again ("" turns it off)
+  meeting: "^!m"           # Ctrl+Alt+M: start or stop meeting capture ("" turns it off)
   tap_ms: 250              # a press shorter than this counts as a tap
   double_tap_ms: 400       # the most time allowed between the two taps
 
@@ -69,6 +70,19 @@ dictionary:
 # `gpw snippets` shows where the file is, the names you can say and whether it has errors.
 snippets:
   path: null               # null = <data_dir>/snippets.yaml, created with an example on first start
+
+# Meeting capture: Teams, Zoom or a webinar from this PC's own audio. Start and stop it with
+# hotkeys.meeting or the tray menu. Records the call (what plays on your speakers or headset)
+# and your mic as two tracks, then writes notes/meetings/YYYY-MM-DD HHMM <title>.md after the call.
+# Nobody on the call is told: get consent where the law or your company requires it.
+meetings:
+  capture_mic: true        # false = call audio only (webinars where you just listen)
+  max_hours: 4             # capture stops on its own after this long
+  keep_audio: false        # true keeps the two tracks after the note is written
+
+files:
+  meetings: null           # null = <data_dir>/meetings: the tracks while a meeting is captured and
+                           # processed. `gpw meeting list` shows what is there.
 
 # Light cleanup never changes word choice. The rules run locally in well under a millisecond.
 cleanup:

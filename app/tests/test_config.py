@@ -158,3 +158,39 @@ def test_snippets_path_defaults_to_the_data_folder_and_can_move(tmp_path):
     assert parse_config({"app": {"data_dir": str(data)}}).snippets_path == data / "snippets.yaml"
     moved = parse_config({"app": {"data_dir": str(data)}, "snippets": {"path": str(tmp_path / "shared.yaml")}})
     assert moved.snippets_path == tmp_path / "shared.yaml"
+
+
+def test_meetings_defaults_and_folder(tmp_path):
+    from gpw.config import parse_config
+
+    config = parse_config({"app": {"data_dir": str(tmp_path)}})
+    m = config.meetings
+    assert (m.capture_mic, m.max_hours, m.keep_audio) == (True, 4.0, False)
+    assert config.meetings_dir == tmp_path / "meetings"
+    assert config.hotkeys.meeting == "^!m"
+    custom = parse_config({
+        "meetings": {"capture_mic": False, "max_hours": 1.5, "keep_audio": True},
+        "files": {"meetings": str(tmp_path / "calls")},
+        "hotkeys": {"meeting": ""},
+    })
+    assert (custom.meetings.capture_mic, custom.meetings.max_hours, custom.meetings.keep_audio) == (False, 1.5, True)
+    assert custom.meetings_dir == tmp_path / "calls" and custom.hotkeys.meeting == ""
+
+
+def test_meetings_limits_and_clashing_key():
+    import pytest
+
+    from gpw.config import parse_config
+
+    for bad in (0, -1, 25):
+        with pytest.raises(ValueError, match="meetings.max_hours"):
+            parse_config({"meetings": {"max_hours": bad}})
+    with pytest.raises(ValueError, match="hotkeys.recent and hotkeys.meeting"):
+        parse_config({"hotkeys": {"meeting": "^!h"}})
+
+
+def test_example_config_has_the_meeting_settings():
+    from gpw.config import DEFAULT_CONFIG, load_config
+
+    config = load_config(DEFAULT_CONFIG)
+    assert config.hotkeys.meeting == "^!m" and config.meetings.max_hours == 4 and config.meetings.folder is None
