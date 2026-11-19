@@ -116,7 +116,9 @@ def test_the_near_zone_is_the_open_conversation(linkedin):
     assert "Lemonte Pegues, PMP" in near and MESSAGE in near
     for elsewhere in ["Jordan Whitfield", "Gideon Marsh", "My Network", "Address and search bar"]:
         assert elsewhere not in near
-    assert [zone for zone, _ in parts][:2] == ["near", "title"] and parts[-1][0] == "far"
+    order = [zone for zone, _ in parts]
+    assert order == sorted(order, key=["near", "title", "page", "far"].index)  # near rings first, far last
+    assert order[0] == "near" and order[-1] == "far" and order.count("title") == 1
 
 
 def test_near_names_fill_the_keyword_slots_first(linkedin):
@@ -286,7 +288,7 @@ def jon_window(body_full_name=False):
 def fix_for(tree):
     nodes, focus = flatten(tree)
     found = extract_names(assemble_parts(nodes, node_zones(nodes, focus)))
-    return NameFix(found.words, near=found.near, tiers=found.tiers)
+    return NameFix(found.words, near=found.near, tiers=found.tiers, closeness=found.closeness)
 
 
 def test_the_header_name_beats_a_lone_mention_in_the_thread():
@@ -322,3 +324,59 @@ def test_full_name_tiers():
     assert found.tiers["Jon"] == found.tiers["Bruno"] == 3  # repeated near the cursor
     assert found.tiers["Mia"] == 3 and found.tiers["Priya"] == 2 and found.tiers["Tobias"] == 1
     assert "John" not in found.tiers  # only ever on its own
+
+
+# -- two different people: the one you are typing to wins (LinkedIn Recruiter) --
+
+def recruiter_window(open_with, listed, draft=""):
+    """LinkedIn Talent Solutions inbox in Chrome: a conversation list with previews, and the open
+    conversation with its header, an earlier message of yours, and the message box."""
+    first = open_with.split()[0]
+    inbox = el("Inbox", children=[
+        el(listed, "Nov 18", "I'm headed out early today, can we talk Monday?"),
+        el(f"{listed}. Message preview: I'm headed out early today, can we talk Monday?"),
+        el("Priya Raman", "Nov 17", "Sounds good."),
+        el("Tobias Wren", "Nov 15", "Thanks for the update."),
+    ])
+    conversation = el(children=[
+        el(open_with, "Talent Partner at Acme"),  # header
+        el("Messages", children=[
+            el(f"{open_with} sent the following message at 9:02 AM"),
+            el("Thanks for reaching out. What range did you have in mind?"),
+            el("You sent the following message at 9:10 AM"),
+            el(f"Hi {first}, I wanted to follow up on the role."),
+        ]),
+        el(children=[el("Write a message…", draft, focus=True), el("Send")]),
+    ])
+    return el("Home | LinkedIn Talent Solutions - Google Chrome", children=[
+        el("Back", "Forward", "Reload", "Address and search bar", far=True),
+        el("Home | LinkedIn Talent Solutions", children=[
+            el("Projects", "Jobs", "Talent Pool", "Reports", far=True),  # nav
+            el(children=[inbox, conversation]),
+        ]),
+    ])
+
+
+def test_typing_to_jon_bruno_john_in_the_inbox_list_does_not_block_jon():
+    # The real miss: "John Lacio" in the inbox list matched the heard "John" exactly, so nothing changed.
+    fix = fix_for(recruiter_window(open_with="Jon Bruno", listed="John Lacio"))
+    assert fix("Hi John, thanks for getting back to me.") == "Hi Jon, thanks for getting back to me."
+    assert fix.from_screen == 1 and fix.ambiguous == 0
+
+
+def test_a_wrong_john_already_in_your_draft_does_not_win():
+    # A lone word in the message box (an earlier dictation that came out wrong) is no evidence.
+    fix = fix_for(recruiter_window(open_with="Jon Bruno", listed="John Lacio", draft="Hi John, one more thing:"))
+    assert fix("Thanks John.") == "Thanks Jon."
+
+
+def test_typing_to_john_lacio_john_stays():
+    fix = fix_for(recruiter_window(open_with="John Lacio", listed="Jon Bruno"))
+    assert fix("Hi John, thanks for getting back to me.") == "Hi John, thanks for getting back to me."
+    assert fix.changed == 0 and fix.ambiguous == 0
+
+
+def test_both_people_near_the_cursor_leave_the_word_alone():
+    found = extract_names([("near", "Jon Bruno\nJohn Lacio\nHi Jon and John, quick question."), ("title", "Group chat")])
+    fix = NameFix(found.words, near=found.near, tiers=found.tiers)
+    assert fix("Thanks John.") == "Thanks John." and fix("Thanks Jhon.") == "Thanks Jhon." and fix.ambiguous == 1

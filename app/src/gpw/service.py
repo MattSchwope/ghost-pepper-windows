@@ -417,7 +417,8 @@ class DictationService:
         seen = frozenset(screen.names.words) if screen is not None else frozenset()
         near = set(screen.names.near) if screen is not None else set()
         tiers = dict(screen.names.tiers) if screen is not None else {}
-        fixer = NameFix(set(seen), words.prefer if words else {}, near=near, tiers=tiers)
+        closeness = dict(screen.names.closeness) if screen is not None else {}
+        fixer = NameFix(set(seen), words.prefer if words else {}, near=near, tiers=tiers, closeness=closeness)
         snippet = self._find_snippet(raw_text, words.replace if words else {})
         if snippet is not None:
             text = snippet.text

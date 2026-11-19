@@ -11,7 +11,8 @@ password fields, and anything UI Automation cannot read (remote desktop, images,
 
 Zones (closest to the cursor first, see UIAWindowReader.window_parts):
   near   the focused field and the panes around it: the conversation or email being answered,
-         its header, To and Subject. Grown outward from the focus until it holds NEAR_MIN_CHARS.
+         its header, To and Subject. Grown outward from the focus until it holds NEAR_MIN_CHARS,
+         in rings, so what is closer still ranks first.
   title  the window title.
   page   everything else, in rings by how far out from the focus it sits.
   far    toolbars, menus, tab strips, folder trees, nav bars, sidebars and page banners.
@@ -238,11 +239,14 @@ def node_zones(nodes: list[Node], focus: int, near_min_chars: int = NEAR_MIN_CHA
 
 
 def assemble_parts(nodes: list[Node], zones: list[tuple[str, int]]) -> list[tuple[str, str]]:
-    """The window's text as (zone, text) parts, closest to the cursor first: near, title, page rings outward, far."""
+    """The window's text as (zone, text) parts, closest to the cursor first: near rings, title, page rings, far.
+
+    The near zone keeps its rings apart, so the open conversation (ring 2, say) still ranks ahead of
+    the conversation list next to it (ring 3) when a short conversation pulls both into near."""
     buckets: dict[tuple[int, int], list[str]] = {}
     for node, (zone, ring) in zip(nodes, zones):
         if node.text:
-            order = (ZONE_ORDER[zone], ring if zone == "page" else 0)
+            order = (ZONE_ORDER[zone], ring if zone in ("near", "page") else 0)
             buckets.setdefault(order, []).extend(node.text)
     return [(ZONES[order[0]], "\n".join(texts)) for order, texts in sorted(buckets.items())]
 

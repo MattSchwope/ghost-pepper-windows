@@ -199,3 +199,21 @@ def test_linkedin_header_spelling_beats_an_earlier_wrong_john(make_service):
     service = make_service(engine=engine, screen=ScreenReader(lambda: FakeWindowReader(LinkedIn())))
     assert dictate(service).text == "Jon, the base salary works for me."
     assert engine.calls[0]["keywords"][0] == "Jon Bruno"
+
+
+def test_recruiter_inbox_john_does_not_block_the_open_conversations_jon(make_service, caplog):
+    from test_screen_zones import assemble_parts, flatten, node_zones, recruiter_window
+
+    class Recruiter:
+        app, title = "chrome.exe", "Home | LinkedIn Talent Solutions - Google Chrome"
+
+        def parts(self):
+            nodes, focus = flatten(recruiter_window(open_with="Jon Bruno", listed="John Lacio"))
+            return assemble_parts(nodes, node_zones(nodes, focus))
+
+    caplog.set_level(logging.INFO)
+    engine = FakeEngine(text="Hi John, thanks for getting back to me.")
+    service = make_service(engine=engine, screen=ScreenReader(lambda: FakeWindowReader(Recruiter())))
+    assert dictate(service).text == "Hi Jon, thanks for getting back to me."
+    assert engine.calls[0]["keywords"][0] == "Jon Bruno"
+    assert "fixed=1 (screen=1 near=0 preferred=0) ambiguous=0" in caplog.text

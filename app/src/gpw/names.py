@@ -233,6 +233,8 @@ class ScreenNames:
     zones: dict[str, int] = field(default_factory=dict)  # how many of `names` came from each zone
     # How strongly the screen backs a spelling, from the full names it is part of (see FULL_NAME_*).
     tiers: dict[str, int] = field(default_factory=dict)
+    # Spelling -> the closest part of the window it shows up in, as part of a full name if it ever is.
+    closeness: dict[str, int] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.names)
@@ -353,9 +355,14 @@ def extract_names(text: str | Sequence[tuple[str, str]], max_names: int = MAX_SC
     near = {n for n in counts if parts[where[n]][0] == "near"} | {w for w in words_out if parts[word_where[w]][0] == "near"}
     zones = Counter(parts[where[n]][0] for n in names)
     tiers: dict[str, int] = {}
+    closeness = dict(word_where)  # a word in a full name: where its nearest full name sits
+    in_full: set[str] = set()
     for name in counts:
         if " " not in name:
             continue
+        for word in name.split():
+            closeness[word] = where[name] if word not in in_full else min(closeness[word], where[name])
+            in_full.add(word)
         if "title" in seen_in[name] or near_count[name] >= 2:
             tier = FULL_NAME_HEADER
         elif "near" in seen_in[name]:
@@ -366,6 +373,7 @@ def extract_names(text: str | Sequence[tuple[str, str]], max_names: int = MAX_SC
             tiers[word] = max(tiers.get(word, 0), tier)
     return ScreenNames(
         names=names, words=set(top_words), near=near, zones={z: zones.get(z, 0) for z in ZONES}, tiers=tiers,
+        closeness=closeness,
     )
 
 
@@ -438,6 +446,7 @@ class NameFix:
     prefer: dict[str, str] = field(default_factory=dict)
     near: set[str] = field(default_factory=set)  # names and words read close to the cursor
     tiers: dict[str, int] = field(default_factory=dict)  # ScreenNames.tiers: full-name evidence per spelling
+    closeness: dict[str, int] = field(default_factory=dict)  # ScreenNames.closeness: lower is nearer the cursor
     from_screen: int = 0
     from_near: int = 0  # the loose pass
     from_prefer: int = 0
@@ -457,6 +466,13 @@ class NameFix:
     def changed(self) -> int:
         return self.from_screen + self.from_near + self.from_prefer
 
+    def _backing(self, folded: str, matches: set[str]) -> tuple[int, int, int]:
+        """How strongly the screen backs one spelling: (in a full name, nearness, full-name tier)."""
+        variants = [s for s in matches if s.casefold() == folded]
+        tier = max(self.tiers.get(s, 0) for s in variants)
+        nearest = min(self.closeness.get(s, 1_000_000) for s in variants)
+        return (1 if tier else 0, -nearest, tier)
+
     def spelling(self, word: str, at_sentence_start: bool) -> str | None:
         """The spelling to use for one capitalized transcript word, or None to leave it."""
         if len(_fold(word)) < 2 or (at_sentence_start and is_common(word)):
@@ -466,11 +482,13 @@ class NameFix:
             matches = {s for s in self.screen_words if sounds_alike(word, s)}
         spellings = {s.casefold() for s in matches}
         if len(spellings) > 1:
-            # A spelling in a full name beats one seen only on its own; a header beats a body.
-            tier = {f: max(self.tiers.get(s, 0) for s in matches if s.casefold() == f) for f in spellings}
-            best = max(tier.values())
-            leaders = [f for f in spellings if tier[f] == best]
-            if best == 0 or len(leaders) > 1:
+            # A spelling in a full name beats one seen only on its own ("Hi John" in a thread or a
+            # draft); among full names, the one closer to the cursor wins (the open conversation's
+            # "Jon Bruno" over the inbox list's "John Lacio"); then a header beats a body.
+            rank = {f: self._backing(f, matches) for f in spellings}
+            best = max(rank.values())
+            leaders = [f for f in spellings if rank[f] == best]
+            if best[0] == 0 or len(leaders) > 1:
                 if word not in matches:  # spelled as on screen: leave it quietly
                     self.ambiguous += 1
                 return None
