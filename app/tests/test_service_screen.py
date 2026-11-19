@@ -183,3 +183,19 @@ def test_linkedin_reply_gets_the_mumbled_name_from_the_open_conversation(make_se
     service.pasted(result.dictation_id, 1500, 40, True)
     record = latency_records(service)[-1]
     assert record["screen_near"] == 4 and record["names_fixed"] == 2
+
+
+def test_linkedin_header_spelling_beats_an_earlier_wrong_john(make_service):
+    from test_screen_zones import assemble_parts, flatten, jon_window, node_zones
+
+    class LinkedIn:
+        app, title = "chrome.exe", "Messaging | LinkedIn - Google Chrome"
+
+        def parts(self):
+            nodes, focus = flatten(jon_window())
+            return assemble_parts(nodes, node_zones(nodes, focus))
+
+    engine = FakeEngine(text="John, the base salary works for me.")
+    service = make_service(engine=engine, screen=ScreenReader(lambda: FakeWindowReader(LinkedIn())))
+    assert dictate(service).text == "Jon, the base salary works for me."
+    assert engine.calls[0]["keywords"][0] == "Jon Bruno"

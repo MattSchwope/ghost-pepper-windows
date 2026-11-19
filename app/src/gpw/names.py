@@ -36,6 +36,11 @@ LOOSE_SIMILARITY = 0.6
 LOOSE_KNOWN_SIMILARITY = 0.75  # stricter when the heard word is itself a known first name
 LOOSE_MARGIN = 0.1  # the best candidate must beat the runner-up by this much
 LOOSE_LENGTH_RATIO = 0.65  # heard and name no more than this far apart in length
+# Evidence that a spelling is someone's name, from the full names it shows up in ("Jon Bruno").
+# A lone word in a message body ("Hi John") is the weakest: it may be an earlier dictation gone wrong.
+FULL_NAME_ELSEWHERE = 1  # in a full name somewhere on screen
+FULL_NAME_NEAR = 2  # in a full name near the cursor
+FULL_NAME_HEADER = 3  # in a full name in the window title, or repeated near the cursor (a header, a signature)
 LOOSE_KEY_DISTANCE = 1  # consonant sounds a mumble may drop; 2 for keys longer than 4 sounds
 
 _VARIANTS = variant_groups()
@@ -226,6 +231,8 @@ class ScreenNames:
     words: set[str] = field(default_factory=set)
     near: set[str] = field(default_factory=set)  # names and words from the near-focus zone
     zones: dict[str, int] = field(default_factory=dict)  # how many of `names` came from each zone
+    # How strongly the screen backs a spelling, from the full names it is part of (see FULL_NAME_*).
+    tiers: dict[str, int] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.names)
@@ -286,6 +293,8 @@ def extract_names(text: str | Sequence[tuple[str, str]], max_names: int = MAX_SC
     where: dict[str, int] = {}  # name -> the first (closest) part it shows up in
     words_out: Counter[str] = Counter()
     word_where: dict[str, int] = {}
+    seen_in: dict[str, set[str]] = {}  # name -> the zones it shows up in
+    near_count: Counter[str] = Counter()  # times each name shows up near the cursor
 
     def keep_word(word: str, at_start: bool, in_full_name: bool) -> bool:
         if is_common(word):
@@ -324,6 +333,9 @@ def extract_names(text: str | Sequence[tuple[str, str]], max_names: int = MAX_SC
                 counts[candidate] += 1
                 first_seen.setdefault(candidate, len(first_seen))
                 where.setdefault(candidate, index)
+                seen_in.setdefault(candidate, set()).add(parts[index][0])
+                if parts[index][0] == "near":
+                    near_count[candidate] += 1
 
     # A full name also counts the times its first or last name shows up alone ("Kelli Smith" ... "Kelli").
     score = {n: counts[n] + sum(counts[w] for w in n.split() if w != n) for n in counts}
@@ -340,8 +352,20 @@ def extract_names(text: str | Sequence[tuple[str, str]], max_names: int = MAX_SC
     top_words = sorted(words_out, key=lambda w: (word_where[w], -words_out[w]))[:MAX_NAME_WORDS]
     near = {n for n in counts if parts[where[n]][0] == "near"} | {w for w in words_out if parts[word_where[w]][0] == "near"}
     zones = Counter(parts[where[n]][0] for n in names)
+    tiers: dict[str, int] = {}
+    for name in counts:
+        if " " not in name:
+            continue
+        if "title" in seen_in[name] or near_count[name] >= 2:
+            tier = FULL_NAME_HEADER
+        elif "near" in seen_in[name]:
+            tier = FULL_NAME_NEAR
+        else:
+            tier = FULL_NAME_ELSEWHERE
+        for word in name.split():
+            tiers[word] = max(tiers.get(word, 0), tier)
     return ScreenNames(
-        names=names, words=set(top_words), near=near, zones={z: zones.get(z, 0) for z in ZONES},
+        names=names, words=set(top_words), near=near, zones={z: zones.get(z, 0) for z in ZONES}, tiers=tiers,
     )
 
 
@@ -402,7 +426,9 @@ class NameFix:
     Two passes:
       1. Each capitalized word that sounds like a name on screen (sounds_alike) takes its spelling.
          Names near the cursor (`near`) come first: if exactly one near spelling fits, it wins even
-         when another spelling shows elsewhere on screen. Two spellings that fit: left alone.
+         when another spelling shows elsewhere on screen. When several fit, the one backed by the
+         strongest full name wins (`tiers`): "Jon Bruno" in the header beats a lone "Hi John" in
+         the thread. Two spellings backed equally: left alone.
       2. Loose, for mumbled names: a capitalized word, or two or three run together ("Lemon Tay"),
          that sounds like nothing on screen takes a near-focus name it clearly resembles
          (loose_score), when no other near name comes close (LOOSE_MARGIN).
@@ -411,6 +437,7 @@ class NameFix:
     screen_words: set[str] = field(default_factory=set)
     prefer: dict[str, str] = field(default_factory=dict)
     near: set[str] = field(default_factory=set)  # names and words read close to the cursor
+    tiers: dict[str, int] = field(default_factory=dict)  # ScreenNames.tiers: full-name evidence per spelling
     from_screen: int = 0
     from_near: int = 0  # the loose pass
     from_prefer: int = 0
@@ -437,18 +464,24 @@ class NameFix:
         matches = {s for s in self._near_words if sounds_alike(word, s)}
         if not matches:
             matches = {s for s in self.screen_words if sounds_alike(word, s)}
-        if word in matches:  # already spelled as the screen shows it (near the cursor first)
-            return None
         spellings = {s.casefold() for s in matches}
+        if len(spellings) > 1:
+            # A spelling in a full name beats one seen only on its own; a header beats a body.
+            tier = {f: max(self.tiers.get(s, 0) for s in matches if s.casefold() == f) for f in spellings}
+            best = max(tier.values())
+            leaders = [f for f in spellings if tier[f] == best]
+            if best == 0 or len(leaders) > 1:
+                if word not in matches:  # spelled as on screen: leave it quietly
+                    self.ambiguous += 1
+                return None
+            matches = {s for s in matches if s.casefold() == leaders[0]}
+            spellings = {leaders[0]}
         if len(spellings) == 1:
             choice = next(iter(matches))
             if len(matches) > 1:  # Kelli and KELLI: take the one with lowercase letters
                 choice = sorted(matches, key=lambda s: (s.isupper(), s))[0]
             self.from_screen += choice != word
             return choice if choice != word else None
-        if len(spellings) > 1:
-            self.ambiguous += 1
-            return None
         if word.casefold() in self._exact:
             return None
         preferred = self._prefer.get(word.casefold())

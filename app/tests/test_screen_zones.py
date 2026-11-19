@@ -257,3 +257,68 @@ def test_loose_score():
     assert loose_score("Jennifer", "Lemonte") is None  # different first sound
     assert loose_score("Pegs", "Pegues") and not loose_score("Pg", "Pegues")
     assert loose_score("Peggy", "Pegues", known=True) is None  # a known first name heard: consonants must match
+
+
+# -- a full name on screen beats a lone mention --
+
+def jon_window(body_full_name=False):
+    """LinkedIn messaging with Jon Bruno. Your own earlier message in the thread says "Hi John",
+    likely an earlier dictation that came out wrong."""
+    body = "Hi John, thanks for the note. I talked to John Smith about it." if body_full_name else "Hi John, thanks for the note."
+    thread = el(children=[
+        el("Jon Bruno", "Talent Partner at Acme", "Active now"),  # the header
+        el("Messages", children=[
+            el("Jon Bruno sent the following messages at 9:02 AM"),
+            el("View Jon’s profile", "Jon Bruno"),
+            el("Thanks for your interest in the role. Can we talk numbers?"),
+            el("You sent the following message at 9:10 AM"),
+            el(body),
+        ]),
+        el(children=[el("Write a message…", focus=True), el("Attach an image to your conversation with Jon Bruno")]),
+    ])
+    sidebar = el("Conversation List", children=[el(name, f"Open conversation with {name}") for name in CONVERSATIONS[:12]])
+    return el("Messaging | LinkedIn - Google Chrome", children=[
+        el("Back", "Forward", "Reload", far=True),
+        el("Messaging | LinkedIn", children=[el(children=[sidebar, thread])]),
+    ])
+
+
+def fix_for(tree):
+    nodes, focus = flatten(tree)
+    found = extract_names(assemble_parts(nodes, node_zones(nodes, focus)))
+    return NameFix(found.words, near=found.near, tiers=found.tiers)
+
+
+def test_the_header_name_beats_a_lone_mention_in_the_thread():
+    # The real miss: header "Jon Bruno", the thread "Hi John, ...", and "John" pasted as heard.
+    fix = fix_for(jon_window())
+    assert fix("John, the base salary works for me.") == "Jon, the base salary works for me."
+    assert fix.from_screen == 1 and fix.ambiguous == 0
+
+
+def test_the_to_line_beats_a_greeting_in_the_quoted_thread():
+    parts = [("near", "To: Kelli Smith\nSubject: Offer\n\n-----\nHi Kelly,\nThe offer is attached."),
+             ("title", "RE: Offer - Message (HTML)")]
+    found = extract_names(parts)
+    assert NameFix(found.words, near=found.near, tiers=found.tiers)("Thanks Kelly.") == "Thanks Kelli."
+
+
+def test_two_people_the_header_wins_and_without_a_header_it_stays_ambiguous():
+    # John Smith mentioned once in the thread, Jon Bruno in the header of the open conversation.
+    assert fix_for(jon_window(body_full_name=True))("Thanks John.") == "Thanks Jon."
+    # No header: each full name shows once near the cursor, so neither spelling is backed more.
+    found = extract_names([("near", "I met John Smith and Jon Bruno at the fair."), ("title", "Notes")])
+    fix = NameFix(found.words, near=found.near, tiers=found.tiers)
+    assert fix("Thanks John.") == "Thanks John." and fix.ambiguous == 0  # John is on screen as said
+    assert fix("Thanks Jhon.") == "Thanks Jhon." and fix.ambiguous == 1
+    # The window title names one of them (a Teams chat): that one wins.
+    titled = extract_names([("near", "I met John Smith and Jon Bruno at the fair."), ("title", "Chat | Jon Bruno | Microsoft Teams")])
+    assert NameFix(titled.words, near=titled.near, tiers=titled.tiers)("Thanks John.") == "Thanks Jon."
+
+
+def test_full_name_tiers():
+    found = extract_names([("near", "Jon Bruno\nJon Bruno sent this\nHi John\nAsk Priya Raman"), ("title", "Chat | Mia Chen"),
+                           ("page", "Tobias Wren")])
+    assert found.tiers["Jon"] == found.tiers["Bruno"] == 3  # repeated near the cursor
+    assert found.tiers["Mia"] == 3 and found.tiers["Priya"] == 2 and found.tiers["Tobias"] == 1
+    assert "John" not in found.tiers  # only ever on its own
