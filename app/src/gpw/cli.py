@@ -49,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     retry = meeting_sub.add_parser("retry", help="Turn a capture into a note, reusing the parts already transcribed")
     retry.add_argument("folder", help='The capture folder\'s name, such as "2026-11-18 1405", or its path')
 
+    inbox = subparsers.add_parser("inbox", help="Long recordings dropped in the inbox: what is waiting, failed or done")
+    inbox_sub = inbox.add_subparsers(dest="inbox_command", required=True)
+    inbox_sub.add_parser("status", help="Show the inbox folders, files waiting, failed files with the reason, and recent notes")
+    inbox_retry = inbox_sub.add_parser("retry", help="Move a failed file back into its profile folder to try it again")
+    inbox_retry.add_argument("file", nargs="?", default="", help="The file's name in inbox/_failed, or its path")
+    inbox_retry.add_argument("--all", action="store_true", help="Retry every file in inbox/_failed")
+    inbox_retry.add_argument("--profile", default=None, help="Use this profile instead of the one it was dropped in")
+
     return parser
 
 
@@ -230,6 +238,22 @@ def _meeting_processor(config: AppConfig, dry_run: bool = False, client=None):
     return MeetingProcessor(config, engine, summary, _dictionary(config))
 
 
+def _inbox_processor(config: AppConfig, dry_run: bool = False):
+    """Its own OpenAI client, so long uploads never take the connection dictation keeps warm."""
+    from .engines import DryRunEngine, DryRunTextModel, OpenAIEngine
+    from .inbox import RecordingProcessor
+
+    if dry_run:
+        return RecordingProcessor(config, DryRunEngine(), DryRunTextModel(), _dictionary(config))
+    from .openai_client import make_client
+    from .text_client import OpenAITextClient
+
+    client = make_client(config.openai)
+    engine = OpenAIEngine(client, config.openai.transcribe_model)
+    summary = OpenAITextClient(client, config.openai.summary_model, reasoning_effort=None)
+    return RecordingProcessor(config, engine, summary, _dictionary(config))
+
+
 def build_service(config: AppConfig, dry_run: bool):
     from .assets import write_assets
     from .engines import DryRunEngine, OpenAIEngine
@@ -287,6 +311,10 @@ def build_service(config: AppConfig, dry_run: bool):
         lambda: DeviceBackend(config.input_device, service._mic_lock),
         lambda: _meeting_processor(config, dry_run, client),
     )
+    from .inbox import InboxManager
+
+    # Long recordings: a watcher and one worker thread, started by run_serve once the server is up.
+    service.inbox = InboxManager(config, lambda: _inbox_processor(config, dry_run))
     return service
 
 
@@ -294,12 +322,15 @@ def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
     from .server import make_server
 
     service = build_service(config, dry_run)
+    inbox = getattr(service, "inbox", None)
     try:
         service.open()
         server = make_server(service, port or config.service_port)
     except Exception:
         service.close()
         raise
+    if inbox is not None:
+        inbox.open()
     logger.info(
         "Dictation service ready on http://127.0.0.1:%s model=%s prep=%s warm_mic=%s ai_cleanup=%s auto_learn=%s%s",
         server.server_port, service.engine.model, config.dictation.audio_prep, config.dictation.warm_mic,
@@ -311,6 +342,8 @@ def run_serve(config: AppConfig, port: int | None, dry_run: bool) -> int:
         logger.info("Stopping dictation service")
     finally:
         server.server_close()
+        if inbox is not None:
+            inbox.close()
         service.close()
     return 0
 
@@ -418,6 +451,71 @@ def run_meeting_retry(config: AppConfig, name: str) -> int:
     return 0 if result.status == "empty" else 1
 
 
+def run_inbox_status(config: AppConfig) -> int:
+    from .config import INBOX_PROFILES
+    from .inbox import DEFAULT_PROFILE, DONE, FAILED, ensure_folders, listing
+
+    root = config.inbox_dir
+    ensure_folders(root)
+    info = listing(config)
+    out = [f"Inbox: {root}", "Drop a recording in one of these folders; the folder picks the kind of summary:"]
+    for profile in INBOX_PROFILES:
+        if profile == DEFAULT_PROFILE:
+            where = f"{root / profile}  (or the inbox folder itself)"
+        else:
+            where = str(root / profile)
+        out.append(f"  {profile:<17} {where}   audio prep: {config.inbox.prep_for(profile)}")
+    if not config.inbox.enabled:
+        out.append("The service is not watching it: inbox.enabled is false in the config.")
+    out.append("")
+    if info.waiting:
+        out.append("Waiting or being processed (the running service picks these up):")
+        out += [f"  {profile:<17} {name}" for profile, name in info.waiting]
+    else:
+        out.append("Nothing waiting.")
+    out.append("")
+    if info.failed:
+        out.append(f"Failed, in {root / FAILED}:")
+        for name, entry in info.failed:
+            reason = str(entry.get("error") or "see the service log").rstrip(".")
+            stage = str(entry.get("stage") or "processing")
+            profile = str(entry.get("profile") or DEFAULT_PROFILE)
+            out.append(f'  {name}  [{profile}] {stage} failed: {reason}. Run: gpw inbox retry "{name}"')
+    else:
+        out.append("No failed files.")
+    if info.done:
+        out.append("")
+        out.append(f"Recent notes (their recordings are in {root / DONE}):")
+        for entry in info.done:
+            when = str(entry.get("at", ""))[:16].replace("T", " ")
+            out.append(f"  {when}  [{entry.get('profile', '')}] {entry.get('note', '')}")
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+def run_inbox_retry(config: AppConfig, name: str, retry_all: bool, profile: str | None) -> int:
+    from .inbox import FAILED, listing, retry_file
+
+    if retry_all:
+        names = [n for n, _ in listing(config).failed]
+        if not names:
+            sys.stdout.write(f"No failed files in {config.inbox_dir / FAILED}.\n")
+            return 0
+    elif name:
+        names = [name]
+    else:
+        sys.stdout.write("Name a file from `gpw inbox status`, or use --all.\n")
+        return 1
+    for n in names:
+        path, used = retry_file(config, n, profile)
+        sys.stdout.write(f"Moved {path.name} back to {path.parent} (profile {used}).\n")
+    sys.stdout.write(
+        "The running Ghost Pepper service picks it up within a minute and reuses the parts already transcribed; "
+        "a notice says when the note is ready. If Ghost Pepper is not running, it is picked up when it starts.\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -442,6 +540,10 @@ def main(argv: list[str] | None = None) -> None:
             code = run_meeting_list(config)
         elif args.command == "meeting" and args.meeting_command == "retry":
             code = run_meeting_retry(config, args.folder)
+        elif args.command == "inbox" and args.inbox_command == "status":
+            code = run_inbox_status(config)
+        elif args.command == "inbox" and args.inbox_command == "retry":
+            code = run_inbox_retry(config, args.file, args.all, args.profile)
         else:
             code = 1
     except (FileNotFoundError, RuntimeError, ValueError) as exc:

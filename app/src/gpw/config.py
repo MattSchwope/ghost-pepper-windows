@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +86,32 @@ class MeetingsConfig:
     folder: Path | None = None  # files.meetings; None: <data_dir>/meetings
 
 
+# The inbox subfolders and the prompt each one uses (Phase 4). A file dropped in the inbox itself
+# uses the first, "meeting".
+INBOX_PROFILES: dict[str, str] = {
+    "meeting": "meeting_summary",
+    "presentation": "presentation",
+    "bd-call": "bd_call",
+    "candidate-screen": "candidate_screen",
+    "client-intake": "client_intake",
+    "hm-debrief": "hiring_manager_debrief",
+}
+
+
+@dataclass(frozen=True)
+class InboxConfig:
+    enabled: bool = True  # watch the inbox while the service runs
+    folder: Path | None = None  # files.inbox; None: <data_dir>/inbox. Can be a OneDrive folder
+    audio_prep: str = "light"  # off | light | strong, for every profile without its own below
+    profile_prep: dict[str, str] = field(default_factory=dict)  # {"presentation": "strong"}
+    settle_seconds: float = 10.0  # a file is picked up once its size has not changed for this long
+    parallel_requests: int = 2  # GPT-Transcribe requests at once; low, so dictation keeps the bandwidth
+    keep_work_days: int = 14  # cached parts of a failed file are kept this long for a re-drop
+
+    def prep_for(self, profile: str) -> str:
+        return self.profile_prep.get(profile, self.audio_prep)
+
+
 @dataclass(frozen=True)
 class AppConfig:
     data_dir: Path
@@ -113,11 +139,17 @@ class AppConfig:
     dictionary: DictionaryConfig = DictionaryConfig()
     snippets: SnippetsConfig = SnippetsConfig()
     meetings: MeetingsConfig = MeetingsConfig()
+    inbox: InboxConfig = InboxConfig()
 
     @property
     def meetings_dir(self) -> Path:
         """Audio while a meeting is captured and processed (files.meetings)."""
         return self.meetings.folder or self.data_dir / "meetings"
+
+    @property
+    def inbox_dir(self) -> Path:
+        """Where long recordings are dropped (files.inbox)."""
+        return self.inbox.folder or self.data_dir / "inbox"
 
     @property
     def work_dir(self) -> Path:
@@ -260,6 +292,32 @@ def parse_meetings_config(raw: dict[str, Any], files: dict[str, Any]) -> Meeting
     )
 
 
+def parse_inbox_config(raw: dict[str, Any], files: dict[str, Any]) -> InboxConfig:
+    d = InboxConfig()
+    folder = files.get("inbox")
+    profile_prep_raw = raw.get("profile_prep") or {}
+    if not isinstance(profile_prep_raw, dict):
+        raise ValueError("inbox.profile_prep must be a list of profile: level lines, such as presentation: strong")
+    profile_prep: dict[str, str] = {}
+    for profile, level in profile_prep_raw.items():
+        name = str(profile).strip().lower()
+        if name not in INBOX_PROFILES:
+            raise ValueError(f"inbox.profile_prep: '{profile}' is not an inbox profile; use one of {', '.join(INBOX_PROFILES)}")
+        profile_prep[name] = _prep_level(level, f"inbox.profile_prep.{name}")
+    parallel = _positive(raw.get("parallel_requests", d.parallel_requests), "inbox.parallel_requests")
+    if parallel > 8:
+        raise ValueError(f"inbox.parallel_requests must be 8 or less; got {parallel}")
+    return InboxConfig(
+        enabled=bool(raw.get("enabled", d.enabled)),
+        folder=Path(folder) if folder else None,
+        audio_prep=_prep_level(raw.get("audio_prep", d.audio_prep), "inbox.audio_prep"),
+        profile_prep=profile_prep,
+        settle_seconds=_positive(raw.get("settle_seconds", d.settle_seconds), "inbox.settle_seconds", float),
+        parallel_requests=parallel,
+        keep_work_days=_positive(raw.get("keep_work_days", d.keep_work_days), "inbox.keep_work_days"),
+    )
+
+
 def parse_config(raw: dict[str, Any]) -> AppConfig:
     app = raw.get("app") or {}
     recording = raw.get("recording") or {}
@@ -325,6 +383,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         dictionary=parse_dictionary_config(raw.get("dictionary") or {}),
         snippets=parse_snippets_config(raw.get("snippets") or {}),
         meetings=parse_meetings_config(raw.get("meetings") or {}, raw.get("files") or {}),
+        inbox=parse_inbox_config(raw.get("inbox") or {}, raw.get("files") or {}),
     )
 
 

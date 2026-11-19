@@ -63,6 +63,8 @@ Copy `.env.example` to `.env` and paste your OpenAI key first. ffmpeg ships insi
 | `gpw snippets` | Shows where the snippets file is, the phrases you can say, and any error in the file. Creates a starter file if there is none |
 | `gpw meeting list` | Lists meeting captures, newest first, with their status (done, failed, interrupted, ...) and where the note went |
 | `gpw meeting retry "2026-11-18 1405"` | Turns a failed or cut-off meeting capture into a note. Parts already transcribed are not sent again |
+| `gpw inbox status` | Shows the inbox folders, recordings waiting, failed ones with the reason, and recent notes. Creates the folders if they are missing |
+| `gpw inbox retry "call.m4a"` | Moves a failed recording from `inbox\_failed` back to its folder, so the service tries it again. `--all` for every failed file, `--profile bd-call` to change its folder |
 
 The default config is `app/config.example.yaml`. App data lives under `C:\GhostPepperWindows`. Models, audio prep and keyword hints are set there; the only cloud service is OpenAI, under the `openai:` block.
 
@@ -88,7 +90,7 @@ A green dot appears in the system tray, and the script starts the Python service
 | Ctrl+Alt+L | Pastes the latest dictation again, into whatever has focus now. Your clipboard is put back afterwards |
 | Ctrl+Alt+M | Starts meeting capture, or stops it. See [Meeting capture](#meeting-capture) |
 
-The tray dot is green when ready, red while listening, pink in hands-free, amber while transcribing and blue while a meeting is being captured. Left-click it for recent dictations. Right-click it for Recent dictations, meeting capture, today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
+The tray dot is green when ready, red while listening, pink in hands-free, amber while transcribing and blue while a meeting is being captured. Left-click it for recent dictations. Right-click it for Recent dictations, meeting capture, the recordings inbox, today's dictation log, the dictionary, the snippets, the log folder, Restart (after config changes) and Exit.
 
 - Clips with no speech are skipped: no API call and no paste.
 - Every dictation is appended to `C:\GhostPepperWindows\notes\dictation\YYYY-MM-DD.md` (`dictation.daily_log`).
@@ -171,6 +173,39 @@ After the call:
 - Restart and Exit in the tray menu ask first while a meeting is being captured, then stop it so its note is written when Ghost Pepper next runs.
 - Transcript text and audio never go into the service log, only counts and timings. Cost is about $0.27 per hour of speech plus a cent or two for the summary.
 - Settings: `hotkeys.meeting`, the `meetings:` block, and `files.meetings` for where the audio is kept while it is processed. `.\app\scripts\start_dictation.ps1 -DryRun` tries a capture end to end without calling OpenAI.
+
+## Long recordings (the inbox)
+
+Drop an audio or video file (m4a, mp3, wav, mp4 and most others) into the inbox and a Markdown note appears with a summary on top and the full transcript below, a timestamp every couple of minutes. Nothing else to do: Ghost Pepper must just be running.
+
+```text
+C:\GhostPepperWindows\inbox\
+  meeting\            a recorded meeting (or drop it in the inbox folder itself)
+  presentation\       a talk, panel or webinar: takeaways, claims and numbers, follow-ups
+  bd-call\            business development call: contracts, hiring needs, decision makers, rates
+  candidate-screen\   candidate screen: clearance, experience, pay, location, availability
+  client-intake\      new job from a client: must-haves, clearance, pay, interview process
+  hm-debrief\         hiring manager feedback: decision, strengths, concerns, next steps
+  _done\              recordings whose note is written
+  _failed\            recordings that failed
+```
+
+1. Right-click the tray dot and choose **Open inbox folder**, or open `C:\GhostPepperWindows\inbox`.
+2. Drop the recording into the folder for the kind of call or talk it is.
+3. About 10 seconds after the file stops changing, it is picked up. While it works, the tray dot's tooltip says so, such as `Recording: talk1.m4a, transcribing, batch 2 of 6`.
+4. A notice says **Recording note ready**. Click it to open the note: `C:\GhostPepperWindows\notes\<folder>\YYYY-MM-DD <title>.md`. The recording moves to `_done`.
+
+Good to know:
+
+- **Phone recordings through OneDrive.** Set `files.inbox` in the config to a folder inside OneDrive (for example `C:/Users/<you>/OneDrive/Recordings`) and save recordings there from your phone. Ghost Pepper waits until OneDrive has finished syncing a file, and downloads an online-only file itself.
+- Files still being copied, temporary files (`~$...`, `.tmp`, `.partial` and the like) and files that aren't audio or video are left alone.
+- **Noisy room recordings.** Audio prep is `light` by default. For a talk recorded from the back of a room, name the file `talk.strong.m4a` or `talk [strong].m4a`, or set `inbox.profile_prep: {presentation: strong}` for every talk.
+- **If it fails** (no internet, a damaged file), the recording moves to `_failed`, a notice says **Recording failed** and why, and clicking it opens `_failed`. Drag the file back into its folder to try again, or run `gpw inbox retry "<file>"`. Parts already transcribed are not paid for twice. `gpw inbox status` lists failed files with the reason.
+- The note date comes from the file name when it has one (`2026-11-18`, `20261118_140501`), else from the file's date. Recorded meetings go to `notes\meeting\`; captured calls stay in `notes\meetings\`.
+- Your dictionary terms are sent as spelling hints and its fixes are applied; light cleanup is not, so the transcript stays word for word. The summary comes from `openai.summary_model` with the folder's prompt in `app/prompts/`.
+- Recordings are processed one at a time in the background. Dictation and meeting capture keep working at full speed meanwhile.
+- Cost is about $0.27 per hour of audio plus a cent or two for the summary. Transcript text never goes into the service log, only file names, counts and timings.
+- Settings: the `inbox:` block and `files.inbox`. After updating Ghost Pepper, run `.\.venv\Scripts\python.exe -m pip install -e ".[test]"` once, which adds the `watchdog` package used to notice new files right away (without it, new files are still found within 30 seconds).
 
 ## Success definition
 

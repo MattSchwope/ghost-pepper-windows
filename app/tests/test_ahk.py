@@ -94,6 +94,11 @@ def test_meeting_helpers():
     assert result.returncode == 0 and "ALL PASSED" in result.stdout, result.stdout + result.stderr
 
 
+def test_inbox_helpers():
+    result = run_ahk(str(REPO_ROOT / "app" / "tests" / "ahk" / "test_inbox_logic.ahk"))
+    assert result.returncode == 0 and "ALL PASSED" in result.stdout, result.stdout + result.stderr
+
+
 def test_recent_window_helpers():
     result = run_ahk(str(REPO_ROOT / "app" / "tests" / "ahk" / "test_recent_logic.ahk"))
     assert result.returncode == 0 and "ALL PASSED" in result.stdout, result.stdout + result.stderr

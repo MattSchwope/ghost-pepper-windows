@@ -15,6 +15,7 @@ Endpoints:
   POST /meeting/mute    on=1 or on=0: mute or unmute the mic track (JSON)
   POST /meeting/retry   folder=<name>, or the last failed capture: process it again (JSON)
   POST /meeting/status  capture state, elapsed time, and the last note or failure (JSON)
+  POST /inbox/status    long recordings: the inbox folder, the file being processed, the last note or failure (JSON)
 
 POSTs must carry the X-GPW-Client header and no Origin header, so a web page
 cannot start the mic: browsers add Origin to cross-site requests and cannot add
@@ -129,6 +130,8 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                     self._send(200, body, "text/plain; charset=utf-8")
                 elif path.startswith("/meeting/"):
                     self._meeting(path.removeprefix("/meeting/"), form)
+                elif path == "/inbox/status":
+                    self._inbox_status()
                 else:
                     self._json(404, {"ok": False, "error": "Not found."})
             except Exception as exc:
@@ -170,6 +173,13 @@ def make_handler(service: DictationService) -> type[BaseHTTPRequestHandler]:
                 self._json(503, {"ok": False, "error": str(exc)})
             except (FileNotFoundError, ValueError) as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
+
+        def _inbox_status(self) -> None:
+            inbox = getattr(service, "inbox", None)
+            if inbox is None:
+                self._json(404, {"ok": False, "error": "The recordings inbox is not available."})
+            else:
+                self._json(200, {"ok": True, **inbox.status()})
 
         def _add_word(self, word: str) -> None:
             try:
