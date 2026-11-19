@@ -22,6 +22,7 @@ Both paths share one engine: fuzzy-audio cleanup, OpenAI GPT-Transcribe and a pe
 | Extras | Personal dictionary, on-screen name spelling, snippets, voice-edit of selected text. |
 | Fuzzy audio | Required. Sources: noisy dictation, recorded talks, phone calls. |
 | Long recordings | Watched folder. The subfolder picks the profile. Summary on top, full transcript below. |
+| Meetings | Teams, Zoom and webinars: start and stop by hotkey or tray. Records call audio and your mic as two tracks, then writes a note after the call with lines labeled Me and Them. Live captions are a later idea. |
 | Output | Plain Markdown, Obsidian-friendly. |
 | Users | Matt first. Team packaging later. |
 
@@ -36,6 +37,7 @@ Decision records: `docs/decisions/ADR-002-openai-default-engine.md` and `docs/de
 | 2 | Dictionary, light cleanup, snippets | Accuracy on names plus speed |
 | 2b | On-screen name spelling | Names with several spellings (Sean, Shawn; Kelly, Kelli) that one dictionary entry can't settle |
 | 2c | Recent dictations | Rescue a dictation that pasted into the wrong window. Small, so it can ship before 2b |
+| 2d | Meeting capture | Transcribe Teams and Zoom calls and webinars. Asked for next, ahead of Phase 3. Builds the shared chunk, summary and note pieces Phase 4 reuses |
 | 3 | Voice-edit selection | Highest-value extra after accuracy |
 | 4 | Long recordings | Secondary use case; most code already exists in `transcribe` |
 | 5 | Noise lab | Tune fuzzy-audio cleanup with real data |
@@ -48,7 +50,7 @@ Phase 1b (live streaming) runs only if Phase 1 misses its latency target.
 
 ```text
 AutoHotkey v2 (front end)
-  ├─ hotkeys: hold, double-tap, voice-edit, cancel, recent, paste last
+  ├─ hotkeys: hold, double-tap, voice-edit, cancel, recent, paste last, meeting start/stop
   ├─ copies selection for voice-edit
   ├─ recent dictations window with copy buttons
   └─ pastes result, then restores the clipboard
@@ -56,6 +58,7 @@ AutoHotkey v2 (front end)
         ▼
 Python service (always running, warm)
   ├─ mic capture (sounddevice)
+  ├─ meeting capture: speaker loopback + mic → two tracks on disk → Me/Them note after stop
   ├─ clip prep: trim silence, highpass, level, optional denoise
   ├─ screen names: focused window text → names, read while recording (UI Automation)
   ├─ engine: gpt-transcribe + screen names + dictionary keywords
@@ -101,6 +104,7 @@ hotkeys:                       # proposed defaults, all configurable
   cancel: Esc
   recent: Ctrl+Alt+H           # Phase 2c: show the last 10 dictations
   paste_last: Ctrl+Alt+L       # Phase 2c: paste the most recent dictation again
+  meeting: Ctrl+Alt+M          # Phase 2d: start or stop meeting capture
 
 dictation:
   cleanup: light               # verbatim | light
@@ -109,11 +113,17 @@ dictation:
   hands_free_max_minutes: 10
   screen_names: true           # Phase 2b: spell names the way the focused window shows them
 
+meetings:                      # Phase 2d
+  capture_mic: true            # false = call audio only (webinars)
+  max_hours: 4                 # stop on its own after this long
+  keep_audio: false            # delete the two tracks once the note is written
+
 files:
   dictionary: C:/GhostPepperWindows/dictionary.yaml
   snippets: C:/GhostPepperWindows/snippets.yaml
   inbox: C:/GhostPepperWindows/inbox     # can point at a OneDrive folder
   notes: C:/GhostPepperWindows/notes
+  meetings: C:/GhostPepperWindows/meetings   # Phase 2d: audio while a meeting is captured and processed
 ```
 
 ## Phase 0: Foundation
@@ -256,6 +266,47 @@ How to check: the copy test runs with `pytest`. The window open time, a dictatio
 
 Built notes: the service answers `POST /recent` (it needs the client header, so a web page cannot read it) with one tab-separated line per dictation and `\` escapes, which the script parses in `app/scripts/lib/recent_logic.ahk`. The program name comes from the script's `/pasted` report and is never logged.
 
+## Phase 2d: Meeting capture
+
+Transcribe a Teams or Zoom call, or a webinar, from the computer's own audio. No bot joins the call and nothing is installed in Teams or Zoom. You start and stop it, and a note lands in your notes folder shortly after the call ends.
+
+**Start and stop**
+- The `meeting` hotkey (Ctrl+Alt+M proposed) or "Start meeting capture" in the tray menu starts it. The same key or "Stop meeting capture" stops it.
+- While capturing, the tray dot turns a distinct color, its tooltip shows the elapsed time, and the tray menu offers "Mute my mic track" for side conversations. Muting yourself in Teams or Zoom doesn't mute this track.
+- It stops on its own after `meetings.max_hours` (4 proposed). If no call audio has been heard after 2 minutes, a tooltip says so, which usually means the call is playing on another device.
+- Dictation keeps working during a capture. Dictated clips go through the normal dictation path, not into the meeting.
+
+**Capture**
+- Two tracks: **Them** is a WASAPI loopback of the speaker or headset the call plays on (the default output device). **Me** is the default mic. Each is written to disk as it records, under `files.meetings/<YYYY-MM-DD HHMM>/`, so a crash or restart keeps everything up to that point.
+- If the default output device changes mid-call, for example when a headset is plugged in, the loopback reopens on the new device and the gap is noted in the log.
+- `meetings.capture_mic: false` records only call audio, for webinars where you just listen.
+- Library choice is part of the build: `sounddevice` doesn't expose WASAPI loopback. Candidates are `PyAudioWPatch` and `soundcard`. Pick one, write down why in the build notes, and add it to the dependencies.
+
+**After stop: transcript**
+1. Speech is found on each track separately (energy-based voice detection), with silence dropped so it isn't paid for.
+2. Speech is split into utterances at pauses and sent to GPT-Transcribe in batches of about 10 minutes of speech, with dictionary keywords and carried-over context, reusing the pause-aware chunking and chunk cache in `longform.py`.
+3. Each utterance keeps its start time and its track, so lines come out labeled and in order: `[00:12:03] Me: ...` and `[00:12:09] Them: ...`. GPT-Transcribe has no speaker labels, so everyone on the far end is "Them".
+4. Echo: on laptop speakers the mic also hears the call. A Me utterance that overlaps Them speech and repeats its words is dropped. A headset avoids the problem.
+5. Dictionary fixes and `prefer:` name spellings run on the transcript. Light cleanup doesn't, so the transcript stays word for word.
+
+**After stop: note**
+- `gpt-6.1-sol` writes the summary from a meeting profile: a title, a short summary, decisions, action items with owners where named, and open questions.
+- The note goes to `notes/meetings/YYYY-MM-DD HHMM <title>.md` with the Phase 4 note format: front matter with `type: meeting`, date, start time, duration, the app in front when capture started (Teams, Zoom or a browser), engine and `speakers: [Me, Them]`, then the summary, then the transcript. A Windows toast says it's ready, and clicking it opens the note.
+- The transcribing, summary and note-writing pieces are built as shared modules so Phase 4's inbox reuses them instead of duplicating them.
+- Audio is deleted once the note is written, unless `meetings.keep_audio: true`. If processing fails, the audio stays, the tray shows the failure, and `gpw meeting retry <folder>` finishes it from cached chunks. `gpw meeting list` shows captures and their status.
+
+**Privacy and consent**
+- Teams and Zoom show other people a notice when they record. This capture doesn't, so it's on you to get consent where the law or your company requires it. The README says so plainly.
+- Transcript text and audio are never written to the service log. Only counts and timings are.
+
+**Done when**
+- [ ] A 60-minute Teams call becomes a note in `notes/meetings/` within 5 minutes of stopping, with no other steps.
+- [ ] With a headset, at least 95% of transcript lines carry the right Me or Them label.
+- [ ] A Zoom call and a browser webinar, with `capture_mic: false`, also produce notes.
+- [ ] Killing the service mid-call keeps the audio up to that point, and `gpw meeting retry` turns it into a note.
+- [ ] Dictation works normally during a capture.
+- [ ] Plugging in a headset mid-call keeps capturing on the new device.
+
 ## Phase 3: Voice-edit selection
 
 1. Select text and hold the voice-edit hotkey.
@@ -353,6 +404,7 @@ Cleanup can help or hurt recognition, so every change has to win on the eval set
 | Dictation | 20 min of speech per workday | ~$2.00 |
 | Light cleanup and edits | `gpt-6-luna` | under $0.25 |
 | Long recordings | 10 hours | ~$2.70 |
+| Meetings | 10 hours of calls, speech only on two tracks, plus summaries | ~$3.00 |
 | Summaries | `gpt-6.1-sol`, 10 recordings | ~$0.50 |
 | **Total** | | **~$5.50** |
 
@@ -366,7 +418,9 @@ Wispr Flow Pro is $12 to $15 per month for comparison.
 | Release-to-paste latency feels slow | Stage timing logs from day one. Phase 1b streaming. |
 | Phantom text on silence | Energy check before any API call. |
 | Clipboard clobbered | AHK saves and restores `ClipboardAll`. |
-| No speaker labels | GPT-Transcribe has none, and the old diarize model shuts down Feb 26, 2027. Revisit if OpenAI adds diarization. |
+| No speaker labels | GPT-Transcribe has none, and the old diarize model shuts down Feb 26, 2027. Revisit if OpenAI adds diarization. Meetings get Me and Them from their two tracks. |
+| Recording a call without telling people | Meeting capture shows no notice to others. The README says to get consent where required. Capture never starts on its own. |
+| Call audio echoes into the mic on laptop speakers | Drop Me utterances that repeat overlapping Them speech. Recommend a headset. |
 | Antivirus flags keyboard hooks or the packaged exe | Code signing in Phase 7. |
 | API key leak | `.env` and `keyring` only. `.gitignore` covers `.env`, audio, notes and eval clips. |
 
@@ -390,7 +444,9 @@ Upstream is Swift, so nothing ports as code. Borrow designs, not files.
 - Ask questions across the Markdown notes archive.
 - OCR for name spelling where UI Automation finds no text (remote desktop, images, scanned PDFs). Opt-in.
 - A contacts list (Outlook or an ATS export) as another source of known name spellings.
-- System-audio capture for Teams and Zoom calls.
+- Live captions during a meeting, with GPT-Live-Transcribe (about $1 per hour). Phase 2d writes the note after the call.
+- Starting meeting capture when Teams or Zoom joins a call, with a prompt first.
+- Names of the people on the far end, from the Teams or Zoom window, instead of "Them".
 
 ## Open questions (decide during the build)
 
