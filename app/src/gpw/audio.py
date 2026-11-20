@@ -6,6 +6,7 @@ so no system install is needed.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import wave
@@ -46,8 +47,14 @@ def find_ffmpeg() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+
+
+def _run(cmd: list[str], background: bool = False) -> subprocess.CompletedProcess:
+    """Run ffmpeg. `background` runs it at below-normal CPU priority on Windows, so a long file
+    being prepared never slows dictation."""
+    kwargs = {"creationflags": BELOW_NORMAL_PRIORITY_CLASS} if background and os.name == "nt" else {}
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-1500:]}")
     return result
@@ -59,14 +66,14 @@ def filter_chain(level: str) -> list[str]:
     return CLEAN_FILTERS[level]
 
 
-def clean_to_wav(ffmpeg: str, src: Path, dst: Path, level: str) -> None:
+def clean_to_wav(ffmpeg: str, src: Path, dst: Path, level: str, background: bool = False) -> None:
     """Decode any audio/video file to 16 kHz mono WAV, applying the cleanup chain."""
     filters = filter_chain(level)
     cmd = [ffmpeg, "-hide_banner", "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE)]
     if filters:
         cmd += ["-af", ",".join(filters)]
     cmd += ["-c:a", "pcm_s16le", str(dst)]
-    _run(cmd)
+    _run(cmd, background)
 
 
 def wav_duration(path: Path) -> float:
@@ -74,7 +81,9 @@ def wav_duration(path: Path) -> float:
         return w.getnframes() / w.getframerate()
 
 
-def detect_silences(ffmpeg: str, src: Path, min_len: float = 0.3, below_mean_db: float = 10.0) -> list[tuple[float, float]]:
+def detect_silences(
+    ffmpeg: str, src: Path, min_len: float = 0.3, below_mean_db: float = 10.0, background: bool = False
+) -> list[tuple[float, float]]:
     """Find pauses in the ORIGINAL recording.
 
     Runs on the source, not the cleaned WAV: volume leveling lifts room noise in
@@ -84,13 +93,13 @@ def detect_silences(ffmpeg: str, src: Path, min_len: float = 0.3, below_mean_db:
     probe = _run([
         ffmpeg, "-hide_banner", "-nostats", "-i", str(src), "-vn", "-ac", "1",
         "-af", "highpass=f=100,volumedetect", "-f", "null", "-",
-    ])
+    ], background)
     m = re.search(r"mean_volume: (-?[\d.]+) dB", probe.stderr)
     threshold = max(-60.0, (float(m.group(1)) if m else -30.0) - below_mean_db)
     result = _run([
         ffmpeg, "-hide_banner", "-nostats", "-i", str(src), "-vn", "-ac", "1",
         "-af", f"highpass=f=100,silencedetect=noise={threshold:.1f}dB:d={min_len}", "-f", "null", "-",
-    ])
+    ], background)
     return parse_silences(result.stderr)
 
 

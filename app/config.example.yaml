@@ -80,9 +80,24 @@ meetings:
   max_hours: 4             # capture stops on its own after this long
   keep_audio: false        # true keeps the two tracks after the note is written
 
+# Long recordings: drop an audio or video file (m4a, mp3, wav, mp4, ...) in the inbox and get
+# notes/<profile>/YYYY-MM-DD <title>.md with a summary and a timestamped transcript. The subfolder
+# picks the summary: meeting (or the inbox itself), presentation, bd-call, candidate-screen,
+# client-intake, hm-debrief. The source then moves to inbox/_done, or to inbox/_failed with the
+# reason in the log. `gpw inbox status` shows what is waiting or failed; `gpw inbox retry <file>`.
+inbox:
+  enabled: true            # watch the inbox while the service runs
+  audio_prep: light        # off | light | strong. A file named talk.strong.m4a or talk [strong].m4a uses strong
+  profile_prep: {}         # per profile, such as {presentation: strong} for talks recorded from the room
+  settle_seconds: 10       # picked up once the file has stopped growing this long (OneDrive still syncing)
+  parallel_requests: 2     # GPT-Transcribe requests at once (1-8); low, so dictation keeps the bandwidth
+  keep_work_days: 14       # parts already transcribed for a failed file are kept this long for a retry
+
 files:
   meetings: null           # null = <data_dir>/meetings: the tracks while a meeting is captured and
                            # processed. `gpw meeting list` shows what is there.
+  inbox: null              # null = <data_dir>/inbox. Can point at a OneDrive folder, such as
+                           # "C:/Users/<you>/OneDrive/Recordings", so phone recordings land there.
 
 # Light cleanup never changes word choice. The rules run locally in well under a millisecond.
 cleanup:

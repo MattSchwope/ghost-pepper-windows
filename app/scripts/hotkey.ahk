@@ -4,6 +4,7 @@
 #Include %A_ScriptDir%\lib\service_client.ahk
 #Include %A_ScriptDir%\lib\recent_logic.ahk
 #Include %A_ScriptDir%\lib\meeting_logic.ahk
+#Include %A_ScriptDir%\lib\inbox_logic.ahk
 
 ; Ghost Pepper Windows hotkeys. The Python service (gpw serve) records and transcribes;
 ; this script owns the keys, the cue sounds, the tray icon and the paste (ADR-003).
@@ -15,6 +16,7 @@
 ;   Ctrl+Alt+H or a click on the tray icon: the last 10 dictations, with copy buttons.
 ;   Ctrl+Alt+L: paste the latest dictation again, after it went to the wrong window.
 ;   Ctrl+Alt+M or the tray menu: start or stop meeting capture. The note is written after the call.
+;   Drop a recording in the inbox folder (tray menu: Open inbox folder): a note is written, and a notice says so.
 ; Keys and timings come from config.yaml (hotkeys:, dictation:) through the service's /health.
 ; Start it with app\scripts\start_dictation.ps1. Pass --dry-run to paste a fixed sentence
 ; instead of calling OpenAI.
@@ -53,7 +55,10 @@ MeetingMicTrack := true
 MeetingRetry := ""
 MeetingSeen := Map()  ; sequence numbers already announced (MeetingNotices)
 MeetingMenuItem := "Start meeting capture"
-ToastTarget := ""  ; what clicking the last meeting notice opens
+ToastTarget := ""  ; what clicking the last meeting or recording notice opens
+InboxSeen := Map()  ; sequence numbers already announced (InboxNotices)
+InboxDir := ""  ; from the service's /inbox/status
+InboxLine := ""  ; the tray tooltip's line about a recording being processed
 RecentGui := ""
 RecentItems := []
 RecentRows := Map()  ; control hwnd -> row number, for the hover text
@@ -99,6 +104,8 @@ Main() {
     SetIcon("idle")
     PollMeeting()
     SetTimer(PollMeeting, 1000)
+    PollInbox()
+    SetTimer(PollInbox, 2000)
     TrayTip("Hold " DictateKey " to dictate. Double-tap it for hands-free." (DryRun ? "`nDry run: nothing goes to OpenAI." : ""),
         "Ghost Pepper is ready", "Mute")
 }
@@ -583,6 +590,7 @@ SetupTray() {
     A_TrayMenu.Add("Mute my mic track", ToggleMeetingMute)
     A_TrayMenu.Add("Retry failed meeting", RetryMeeting)
     A_TrayMenu.Add("Open meeting notes", OpenMeetingNotes)
+    A_TrayMenu.Add("Open inbox folder", OpenInbox)
     A_TrayMenu.Disable("Mute my mic track")
     A_TrayMenu.Disable("Retry failed meeting")
     A_TrayMenu.Add()
@@ -604,9 +612,10 @@ SetIcon(name) {
         shown := icon
     }
     if (icon = "meeting")
-        A_IconTip := MeetingTip(MeetingElapsed, MeetingMuted, MeetingMicTrack, DryRun)
+        tip := MeetingTip(MeetingElapsed, MeetingMuted, MeetingMicTrack, DryRun)
     else
-        A_IconTip := "Ghost Pepper: " tips[name] (DryRun ? " (dry run)" : "")
+        tip := "Ghost Pepper: " tips[name] (DryRun ? " (dry run)" : "")
+    A_IconTip := SubStr(tip (InboxLine != "" ? "`n" InboxLine : ""), 1, 127)
 }
 
 PlayCue(name) {
@@ -822,6 +831,38 @@ OnTrayNotify(wParam, lParam, msg, hwnd) {
         try Run('"' target '"')
         catch
             Run('notepad.exe "' target '"')
+    }
+}
+
+; -- long recordings --
+
+OpenInbox(*) {
+    if (InboxDir != "" && !DirExist(InboxDir))
+        try DirCreate(InboxDir)
+    if (InboxDir != "" && DirExist(InboxDir))
+        Run(InboxDir)
+    else
+        ShowTip("The recordings inbox is not available. Check the service log.", 3000)
+}
+
+; Ask the service about the inbox: the tooltip line while a file is processed, and the notices
+; when a note is ready or a file failed.
+PollInbox() {
+    global InboxDir, InboxLine, ToastTarget
+    r := ""
+    try r := Http("POST", "/inbox/status", "", 1500)
+    if (r = "" || r.status != 200)
+        return
+    InboxDir := InboxFolder(r.body)
+    line := InboxTipLine(r.body)
+    for notice in InboxNotices(r.body, InboxSeen) {
+        ToastTarget := notice.target
+        TrayTip(notice.text, notice.title, notice.title = "Recording failed" ? "Iconx" : "Iconi")
+    }
+    if (line != InboxLine) {
+        InboxLine := line
+        if (State = "idle")
+            SetIcon("idle")
     }
 }
 

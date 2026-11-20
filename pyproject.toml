@@ -18,6 +18,7 @@ dependencies = [
     "numpy>=1.26.0",
     "pyperclip>=1.8.2",
     "PyYAML>=6.0.0",
+    "watchdog>=4.0.0",  # Phase 4: file events for the long-recording inbox
     "comtypes>=1.4; sys_platform == 'win32'",
 ]
 

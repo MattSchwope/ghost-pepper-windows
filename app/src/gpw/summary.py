@@ -51,13 +51,13 @@ def demote_headings(markdown: str, level: int = 3) -> str:
     )
 
 
-def clean_title(title: str) -> str:
+def clean_title(title: str, default: str = DEFAULT_TITLE) -> str:
     title = re.sub(r"[*_`#]+", "", title).strip().strip('"').strip()
     title = " ".join(title.split())
-    return title[:MAX_TITLE_CHARS].rstrip() or DEFAULT_TITLE
+    return title[:MAX_TITLE_CHARS].rstrip() or default
 
 
-def parse_summary(output: str) -> Summary:
+def parse_summary(output: str, default_title: str = DEFAULT_TITLE) -> Summary:
     """Split the model's answer into a title and the sections. Tolerates a `# Title` heading
     instead of the `Title:` line, or no title at all."""
     lines = output.strip().splitlines()
@@ -72,13 +72,15 @@ def parse_summary(output: str) -> Summary:
             title = (m or h).group(1)
             lines.pop(0)
     body = "\n".join(lines).strip()
-    return Summary(clean_title(title), demote_headings(body))
+    return Summary(clean_title(title, default_title), demote_headings(body))
 
 
-def summarize(model: TextModel, instructions: str, transcript: str, context: str = "") -> Summary:
-    """One call to the summary model. `context` is a few lines about the recording that go first."""
+def summarize(model: TextModel, instructions: str, transcript: str, context: str = "",
+              default_title: str = DEFAULT_TITLE) -> Summary:
+    """One call to the summary model. `context` is a few lines about the recording that go first.
+    `default_title` is used when the answer has no title."""
     started = time.perf_counter()
     text = f"{context.strip()}\n\n{transcript}" if context.strip() else transcript
-    summary = parse_summary(model.complete(instructions, text))
+    summary = parse_summary(model.complete(instructions, text), default_title)
     logger.info("Summary took=%.2fs chars_in=%s chars_out=%s", time.perf_counter() - started, len(text), len(summary.body))
     return summary
