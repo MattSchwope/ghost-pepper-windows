@@ -96,11 +96,11 @@ def make_config(tmp_path, **sections):
 def make_service(tmp_path):
     services = []
 
-    def factory(mic=None, engine=None, clean=None, dictionary=None, snippets=None, learner=None, **sections):
+    def factory(mic=None, engine=None, clean=None, dictionary=None, snippets=None, learner=None, screen=None, **sections):
         config = make_config(tmp_path, **sections)
         service = DictationService(
             config, engine or FakeEngine(), mic or FakeMic(), clean=clean, dictionary=dictionary, snippets=snippets,
-            learner=learner, now=lambda: datetime(2026, 10, 28, 9, 15, 0),
+            learner=learner, screen=screen, now=lambda: datetime(2026, 10, 28, 9, 15, 0),
         )
         services.append(service)
         return service
@@ -450,6 +450,7 @@ class FakeLearner:
 
     def __init__(self):
         self.watched = []
+        self.seen = []
         self.started = self.closed = False
 
     def start(self):
@@ -458,8 +459,9 @@ class FakeLearner:
     def close(self):
         self.closed = True
 
-    def watch(self, dictation_id, text):
+    def watch(self, dictation_id, text, seen=frozenset()):
         self.watched.append((dictation_id, text))
+        self.seen.append(set(seen))
         return True
 
     def take_learned(self):

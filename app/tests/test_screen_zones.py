@@ -1,0 +1,474 @@
+"""Names closest to the cursor first, and mumbled names matched to them (Phase 2b, near-focus).
+
+A fake UI Automation tree shaped like LinkedIn messaging in Chrome: the browser toolbar and tab
+strip, LinkedIn's top nav (a banner), the conversation list, the open conversation with its header
+and messages, the message box you type in, and a "People you may know" sidebar. No real UI
+Automation, no network.
+"""
+
+import time
+
+import pytest
+
+from gpw.names import MAX_SCREEN_NAMES, NameFix, extract_names, loose_score
+from gpw.screen import NEAR_MIN_CHARS, Node, ScreenReader, assemble_parts, node_zones
+
+
+def el(*text, children=(), far=False, focus=False):
+    return {"text": [t for t in text if t], "children": list(children), "far": far, "focus": focus}
+
+
+def flatten(tree):
+    """Document-order nodes, as UIAWindowReader.window_parts builds them, and the focused index."""
+    nodes, focus = [], -1
+    stack = [(tree, -1, False)]
+    while stack:
+        item, parent, far = stack.pop()
+        far = far or item["far"]
+        index = len(nodes)
+        nodes.append(Node(parent, list(item["text"]), far))
+        if item["focus"]:
+            focus = index
+        for child in reversed(item["children"]):
+            stack.append((child, index, far))
+    return nodes, focus
+
+
+CONVERSATIONS = [
+    "Jordan Whitfield", "Priya Raman", "Tobias Wren", "Alejandra Ruiz", "Desmond Okafor", "Harriet Vance",
+    "Kwame Mensah", "Svetlana Orlova", "Rafael Quintero", "Imogen Blackwood", "Thaddeus Grant", "Noor Haddad",
+    "Beatriz Salgado", "Callum Fraser", "Yuki Tanaka", "Oluwaseun Adeyemi", "Margaux Lefevre", "Ignatius Cole",
+    "Fenella Brooks", "Lorenzo Bianchi", "Saoirse Kavanagh", "Dmitri Volkov", "Ines Carvalho", "Ezekiel Price",
+]
+PEOPLE_YOU_MAY_KNOW = [
+    "Gideon Marsh", "Rosalind Tate", "Barnaby Holt", "Philippa Crane", "Augustin Moreau", "Wilhelmina Shaw",
+    "Cornelius Pike", "Ottoline Hart", "Leopold Strand", "Marisol Vega", "Kelly Adams",
+]
+MESSAGE = "Hi Matt, thanks for connecting. I wanted to share the program roadmap before Thursday. Kelli on my team has the deck."
+
+
+def linkedin_window():
+    conversation_list = el(
+        "Conversation List",
+        children=[
+            el(f"{name}", f"Open conversation with {name}", f"{name} Nov {i + 1} You: sounds good, talk soon")
+            for i, name in enumerate(CONVERSATIONS)
+        ],
+    )
+    thread = el(
+        children=[
+            el("Lemonte Pegues, PMP", "Senior Program Manager at Acme", "Active now"),  # the header
+            el(
+                "Messages",
+                children=[
+                    el("Lemonte Pegues sent the following messages at 10:42 AM"),
+                    el("View Lemonte’s profile", "Lemonte Pegues, PMP"),
+                    el(MESSAGE),
+                    el("Best, Lemonte Pegues, PMP"),
+                ],
+            ),
+            el(
+                children=[
+                    el("Write a message…", focus=True),
+                    el("Attach an image to your conversation with Lemonte Pegues"),
+                    el("Attach a file to your conversation with Lemonte Pegues"),
+                    el("Open Emoji Keyboard"),
+                    el("Send"),
+                ],
+            ),
+        ],
+    )
+    page = el(
+        "Messaging | LinkedIn",
+        children=[
+            el("Global Navigation", "Home", "My Network", "Jobs", "Messaging", "Notifications", "Me",
+               "For Business", "Try Premium for $0", far=True),  # banner landmark
+            el(children=[conversation_list, thread]),  # main
+            el("People you may know", far=True, children=[  # complementary landmark
+                el(name, f"Invite {name} to connect", f"{name} Connect") for name in PEOPLE_YOU_MAY_KNOW
+            ]),
+            el("About Accessibility Help Center Privacy & Terms Ad Choices Advertising", far=True),  # contentinfo
+        ],
+    )
+    return el(
+        "Messaging | LinkedIn - Google Chrome",
+        children=[
+            el("Back", "Forward", "Reload", "Address and search bar", "linkedin.com/messaging/thread/2-abc", far=True),
+            el(children=[el(t) for t in ["Feed | LinkedIn", "Messaging | LinkedIn", "Gmail Inbox", "Calendar"]],
+               far=True),  # tab strip
+            page,
+        ],
+    )
+
+
+@pytest.fixture
+def linkedin():
+    nodes, focus = flatten(linkedin_window())
+    parts = assemble_parts(nodes, node_zones(nodes, focus))
+    return parts, extract_names(parts)
+
+
+# -- zones --
+
+def test_the_near_zone_is_the_open_conversation(linkedin):
+    parts, found = linkedin
+    near = "\n".join(text for zone, text in parts if zone == "near")
+    assert "Lemonte Pegues, PMP" in near and MESSAGE in near
+    for elsewhere in ["Jordan Whitfield", "Gideon Marsh", "My Network", "Address and search bar"]:
+        assert elsewhere not in near
+    order = [zone for zone, _ in parts]
+    assert order == sorted(order, key=["near", "title", "page", "far"].index)  # near rings first, far last
+    assert order[0] == "near" and order[-1] == "far" and order.count("title") == 1
+
+
+def test_near_names_fill_the_keyword_slots_first(linkedin):
+    _, found = linkedin
+    assert found.names[0] == "Lemonte Pegues"
+    near_names = found.names[: found.zones["near"]]
+    assert set(near_names) == {"Lemonte Pegues", "Acme", "Matt", "Kelli"}  # job title and buttons are not names
+    assert sum(found.zones.values()) == len(found.names) == MAX_SCREEN_NAMES
+    assert {"Lemonte", "Pegues", "Lemonte Pegues", "Kelli"} <= found.near
+    assert "Jordan Whitfield" not in found.near and "Gideon Marsh" not in found.near
+
+
+def test_a_busy_page_no_longer_crowds_out_the_person_you_answer():
+    # Before zones: one text for the whole window, most frequent first, 30 slots. Forty names in
+    # a list, each shown twice, pushed out a name shown once in the conversation.
+    others = [f"{first} {last}" for first in CONVERSATIONS[:8] for last in ["Abbott", "Barlow", "Cardenas", "Dunmore", "Ellery"]]
+    listing = "\n".join(f"{name}\nOpen conversation with {name}" for name in others)
+    flat = extract_names(f"{listing}\nLemonte Pegues, PMP")
+    assert "Lemonte Pegues" not in flat.names and len(flat.names) == MAX_SCREEN_NAMES
+    zoned = extract_names([("near", "Lemonte Pegues, PMP"), ("page", listing)])
+    assert zoned.names[0] == "Lemonte Pegues" and zoned.zones == {"near": 1, "title": 0, "page": 29, "far": 0}
+
+
+def test_near_grows_until_it_holds_enough_text():
+    #       0 window
+    #       1 pane ── 2 list (lots of text), 3 box ── 4 field (focus), 5 button
+    nodes = [Node(-1, ["Window"]), Node(0, []), Node(1, ["x" * 500]), Node(1, []), Node(3, ["draft"]), Node(3, ["Send"])]
+    zones = node_zones(nodes, focus=4, near_min_chars=NEAR_MIN_CHARS)
+    assert [z for z, _ in zones] == ["title", "near", "near", "near", "near", "near"]
+    small = node_zones(nodes, focus=4, near_min_chars=6)  # "draft" and "Send" are enough
+    assert [z for z, _ in small] == ["title", "page", "page", "near", "near", "near"]
+
+
+def test_toolbars_inside_the_near_zone_count_as_near_and_no_focus_means_no_near():
+    #       0 window ── 1 message box (focus) ── 2 formatting bar;  3 menu;  4 pane
+    nodes = [Node(-1, ["Window"]), Node(0, ["draft"]), Node(1, ["Bold Italic"], far=True),
+             Node(0, ["File Edit View"], far=True), Node(0, ["Thread"])]
+    assert [z for z, _ in node_zones(nodes, focus=1, near_min_chars=1)] == ["title", "near", "near", "far", "page"]
+    assert [z for z, _ in node_zones(nodes, focus=-1)] == ["title", "page", "far", "far", "page"]
+
+
+def test_the_near_zone_never_takes_the_whole_window():
+    nodes = [Node(-1, ["Window"]), Node(0, ["Toolbar text"]), Node(0, ["tiny"])]
+    assert [z for z, _ in node_zones(nodes, focus=2)] == ["title", "page", "near"]
+
+
+def test_screen_reader_reports_zones():
+    class Zoned:
+        app, title = "chrome.exe", "Messaging | LinkedIn - Google Chrome"
+
+        def parts(self):
+            nodes, focus = flatten(linkedin_window())
+            return assemble_parts(nodes, node_zones(nodes, focus))
+
+    class Reader:
+        def foreground(self):
+            return Zoned()
+
+    screen = ScreenReader(Reader)
+    try:
+        result = screen.collect(screen.begin(), time.perf_counter() + 2)
+    finally:
+        screen.close()
+    assert result.status == "ok" and result.names.names[0] == "Lemonte Pegues"
+    assert result.names.zones["near"] == 4 and "Lemonte" in result.names.near
+    assert MESSAGE not in repr(result) and "roadmap" not in repr(result)
+
+
+# -- respelling with the near zone --
+
+@pytest.mark.parametrize(
+    "heard, wanted",
+    [
+        ("Lamont, somehow this slipped past me.", "Lemonte, somehow this slipped past me."),  # the real failure
+        ("Lemont, somehow this slipped past me.", "Lemonte, somehow this slipped past me."),
+        ("Lemon Tay, somehow this slipped past me.", "Lemonte, somehow this slipped past me."),
+        ("Thanks Lemon Tay, talk Thursday.", "Thanks Lemonte, talk Thursday."),
+        ("I told Mr. Peggs about it.", "I told Mr. Pegues about it."),
+        ("I told Mr. Pegus about it.", "I told Mr. Pegues about it."),
+        ("Is this Peggy's draft?", "Is this Pegues draft?"),  # one name heard as a possessive
+        ("I read Lemont's roadmap.", "I read Lemonte's roadmap."),
+        ("Thanks Lemon Tay Pegus, see you then.", "Thanks Lemonte Pegues, see you then."),
+        ("Lemontay Pegs, thanks.", "Lemonte Pegues, thanks."),
+        ("Ask Kelly for the deck.", "Ask Kelli for the deck."),  # near Kelli beats the sidebar's Kelly Adams
+    ],
+)
+def test_mumbled_names_come_out_as_the_conversation_spells_them(linkedin, heard, wanted):
+    _, found = linkedin
+    assert NameFix(found.words, near=found.near)(heard) == wanted
+
+
+@pytest.mark.parametrize(
+    "heard",
+    [
+        "Tell Gwendolyn I said hi.",  # not on screen and not close to anything near
+        "Ask Jennifer at Microsoft on Tuesday.",
+        "Lemon cake is good.",  # a sentence-start word, not said to anyone
+        "Will you send it? Mark the date.",  # common words never change
+        "Thanks Sean.",  # Sean is not Shane, near or not (see below)
+        "Tell Gideon Marsh hi.",  # spelled as on screen, even if far
+        "Tell PEGS hi.",  # all caps: an acronym
+        "I like the lemon tay.",  # lowercase: not a name
+        "Talk to him about the Delaware filing.",  # a place, not Delmar: a mumble drops sounds, it does not swap them
+    ],
+)
+def test_names_not_near_the_cursor_are_left_alone(linkedin, heard):
+    _, found = linkedin
+    near = set(found.near) | {"Shane Doyle", "Shane", "Doyle", "Delmar Ruiz"}
+    fix = NameFix(found.words, near=near)
+    assert fix(heard) == heard and fix.from_near == 0
+
+
+def test_only_near_names_qualify_for_the_loose_pass():
+    # Lemonte only in a sidebar: too loose a fit for the strict pass, so "Lemon Tay" stays.
+    heard = "Thanks Lemon Tay, talk soon."
+    assert NameFix({"Lemonte", "Pegues"})(heard) == heard
+    assert NameFix({"Lemonte", "Pegues"}, near={"Lemonte"})(heard) == "Thanks Lemonte, talk soon."
+
+
+def test_two_near_names_that_fit_as_well_leave_the_word_alone():
+    fix = NameFix({"Delmar", "Delmer"}, near={"Delmar Ruiz", "Delmer Hayes"})
+    assert loose_score("Del More", "Delmar") == loose_score("Del More", "Delmer")
+    assert fix("Ask Del More.") == "Ask Del More." and fix.ambiguous == 1 and fix.changed == 0
+    clear = NameFix({"Delmar"}, near={"Delmar Ruiz"})
+    assert clear("Ask Del More.") == "Ask Delmar."
+
+
+def test_loose_changes_are_counted_and_listed(linkedin):
+    _, found = linkedin
+    fix = NameFix(found.words, near=found.near)
+    fix("Thanks Lemon Tay, ask Pegus.")
+    assert (fix.from_near, fix.from_screen, fix.changed) == (1, 1, 2)
+    assert ("Lemon Tay", "Lemonte") in fix.changes
+
+
+def test_loose_score():
+    assert loose_score("Lemon Tay", "Lemonte") > 0.7 and loose_score("Lemon Tay", "Lemonte Pegues") is None
+    assert loose_score("Jennifer", "Lemonte") is None  # different first sound
+    assert loose_score("Pegs", "Pegues") and not loose_score("Pg", "Pegues")
+    assert loose_score("Peggy", "Pegues", known=True) is None  # a known first name heard: consonants must match
+
+
+# -- a full name on screen beats a lone mention --
+
+def jon_window(body_full_name=False):
+    """LinkedIn messaging with Jon Bruno. Your own earlier message in the thread says "Hi John",
+    likely an earlier dictation that came out wrong."""
+    body = "Hi John, thanks for the note. I talked to John Smith about it." if body_full_name else "Hi John, thanks for the note."
+    thread = el(children=[
+        el("Jon Bruno", "Talent Partner at Acme", "Active now"),  # the header
+        el("Messages", children=[
+            el("Jon Bruno sent the following messages at 9:02 AM"),
+            el("View Jon’s profile", "Jon Bruno"),
+            el("Thanks for your interest in the role. Can we talk numbers?"),
+            el("You sent the following message at 9:10 AM"),
+            el(body),
+        ]),
+        el(children=[el("Write a message…", focus=True), el("Attach an image to your conversation with Jon Bruno")]),
+    ])
+    sidebar = el("Conversation List", children=[el(name, f"Open conversation with {name}") for name in CONVERSATIONS[:12]])
+    return el("Messaging | LinkedIn - Google Chrome", children=[
+        el("Back", "Forward", "Reload", far=True),
+        el("Messaging | LinkedIn", children=[el(children=[sidebar, thread])]),
+    ])
+
+
+def fix_for(tree):
+    nodes, focus = flatten(tree)
+    found = extract_names(assemble_parts(nodes, node_zones(nodes, focus)))
+    return NameFix(found.words, near=found.near, tiers=found.tiers, closeness=found.closeness)
+
+
+def test_the_header_name_beats_a_lone_mention_in_the_thread():
+    # The real miss: header "Jon Bruno", the thread "Hi John, ...", and "John" pasted as heard.
+    fix = fix_for(jon_window())
+    assert fix("John, the base salary works for me.") == "Jon, the base salary works for me."
+    assert fix.from_screen == 1 and fix.ambiguous == 0
+
+
+def test_the_to_line_beats_a_greeting_in_the_quoted_thread():
+    parts = [("near", "To: Kelli Smith\nSubject: Offer\n\n-----\nHi Kelly,\nThe offer is attached."),
+             ("title", "RE: Offer - Message (HTML)")]
+    found = extract_names(parts)
+    assert NameFix(found.words, near=found.near, tiers=found.tiers)("Thanks Kelly.") == "Thanks Kelli."
+
+
+def test_two_people_the_header_wins_and_without_a_header_it_stays_ambiguous():
+    # John Smith mentioned once in the thread, Jon Bruno in the header of the open conversation.
+    assert fix_for(jon_window(body_full_name=True))("Thanks John.") == "Thanks Jon."
+    # No header: each full name shows once near the cursor, so neither spelling is backed more.
+    found = extract_names([("near", "I met John Smith and Jon Bruno at the fair."), ("title", "Notes")])
+    fix = NameFix(found.words, near=found.near, tiers=found.tiers)
+    assert fix("Thanks John.") == "Thanks John." and fix.ambiguous == 0  # John is on screen as said
+    assert fix("Thanks Jhon.") == "Thanks Jhon." and fix.ambiguous == 1
+    # The window title names one of them (a Teams chat): that one wins.
+    titled = extract_names([("near", "I met John Smith and Jon Bruno at the fair."), ("title", "Chat | Jon Bruno | Microsoft Teams")])
+    assert NameFix(titled.words, near=titled.near, tiers=titled.tiers)("Thanks John.") == "Thanks Jon."
+
+
+def test_full_name_tiers():
+    found = extract_names([("near", "Jon Bruno\nJon Bruno sent this\nHi John\nAsk Priya Raman"), ("title", "Chat | Mia Chen"),
+                           ("page", "Tobias Wren")])
+    assert found.tiers["Jon"] == found.tiers["Bruno"] == 3  # repeated near the cursor
+    assert found.tiers["Mia"] == 3 and found.tiers["Priya"] == 2 and found.tiers["Tobias"] == 1
+    assert "John" not in found.tiers  # only ever on its own
+
+
+# -- two different people: the one you are typing to wins (LinkedIn Recruiter) --
+
+def recruiter_window(open_with, listed, draft=""):
+    """LinkedIn Talent Solutions inbox in Chrome: a conversation list with previews, and the open
+    conversation with its header, an earlier message of yours, and the message box."""
+    first = open_with.split()[0]
+    inbox = el("Inbox", children=[
+        el(listed, "Nov 18", "I'm headed out early today, can we talk Monday?"),
+        el(f"{listed}. Message preview: I'm headed out early today, can we talk Monday?"),
+        el("Priya Raman", "Nov 17", "Sounds good."),
+        el("Tobias Wren", "Nov 15", "Thanks for the update."),
+    ])
+    conversation = el(children=[
+        el(open_with, "Talent Partner at Acme"),  # header
+        el("Messages", children=[
+            el(f"{open_with} sent the following message at 9:02 AM"),
+            el("Thanks for reaching out. What range did you have in mind?"),
+            el("You sent the following message at 9:10 AM"),
+            el(f"Hi {first}, I wanted to follow up on the role."),
+        ]),
+        el(children=[el("Write a message…", draft, focus=True), el("Send")]),
+    ])
+    return el("Home | LinkedIn Talent Solutions - Google Chrome", children=[
+        el("Back", "Forward", "Reload", "Address and search bar", far=True),
+        el("Home | LinkedIn Talent Solutions", children=[
+            el("Projects", "Jobs", "Talent Pool", "Reports", far=True),  # nav
+            el(children=[inbox, conversation]),
+        ]),
+    ])
+
+
+def test_typing_to_jon_bruno_john_in_the_inbox_list_does_not_block_jon():
+    # The real miss: "John Lacio" in the inbox list matched the heard "John" exactly, so nothing changed.
+    fix = fix_for(recruiter_window(open_with="Jon Bruno", listed="John Lacio"))
+    assert fix("Hi John, thanks for getting back to me.") == "Hi Jon, thanks for getting back to me."
+    assert fix.from_screen == 1 and fix.ambiguous == 0
+
+
+def test_a_wrong_john_already_in_your_draft_does_not_win():
+    # A lone word in the message box (an earlier dictation that came out wrong) is no evidence.
+    fix = fix_for(recruiter_window(open_with="Jon Bruno", listed="John Lacio", draft="Hi John, one more thing:"))
+    assert fix("Thanks John.") == "Thanks Jon."
+
+
+def test_typing_to_john_lacio_john_stays():
+    fix = fix_for(recruiter_window(open_with="John Lacio", listed="Jon Bruno"))
+    assert fix("Hi John, thanks for getting back to me.") == "Hi John, thanks for getting back to me."
+    assert fix.changed == 0 and fix.ambiguous == 0
+
+
+def test_both_people_near_the_cursor_leave_the_word_alone():
+    found = extract_names([("near", "Jon Bruno\nJohn Lacio\nHi Jon and John, quick question."), ("title", "Group chat")])
+    fix = NameFix(found.words, near=found.near, tiers=found.tiers)
+    assert fix("Thanks John.") == "Thanks John." and fix("Thanks Jhon.") == "Thanks Jhon." and fix.ambiguous == 1
+
+
+# -- the real Recruiter tree: Chrome reports the whole page as focused --
+# Observed shape (counts only): window > panes > web document > region "main" > region > list of
+# 23 items; the open conversation is the list item holding the message box, the other items are
+# other people. Chrome often reports the web document itself as focused; the caret is in the box.
+
+def recruiter_inline_window(focus_on="edit"):
+    # Sizes as observed: each other item holds several hundred characters (previews, labels, buttons).
+    preview = "thanks for the update on the search, the hiring manager wants to move quickly on this one " * 6
+    others = [el(name, f"{name} Nov {i + 1}", f"{name}. Message preview: {preview}", "Sent", "Archive", "Mark unread")
+              for i, name in enumerate(["John Lacio", *CONVERSATIONS[:14]])]
+    open_item = el(children=[
+        el("Jonathan Spencer", "Senior Recruiter at Acme"),
+        el("Jonathan Spencer sent the following message at 4:12 PM"),
+        el("oh yeah lol"),
+        el("You sent the following message at 4:15 PM"),
+        el("Hey Jon, I wanted to check on the role."),
+        el("Write a message…", focus=focus_on == "edit"),
+        el("Send"),
+    ])
+    conversation_list = el("Inbox", children=[*others[:6], open_item, *others[6:]])
+    document = el("Home | LinkedIn Talent Solutions", focus=focus_on == "document", children=[
+        el("Recruiter", "Projects", "Jobs", "Inbox", "Reports", far=True),  # banner
+        el(children=[el("Search inbox", "Filters", "Unread"), conversation_list]),  # main
+    ])
+    return el("Home | LinkedIn Talent Solutions - Google Chrome", children=[
+        el("Back", "Forward", "Reload", "Address and search bar", far=True),
+        el(children=[el(children=[document])]),
+    ])
+
+
+def zoned(tree):
+    nodes, focus = flatten(tree)
+    zones = node_zones(nodes, focus)
+    return assemble_parts(nodes, zones), zones
+
+
+def test_recruiter_caret_in_the_message_box_makes_only_the_open_conversation_near():
+    parts, _ = zoned(recruiter_inline_window(focus_on="edit"))
+    near = "\n".join(t for z, t in parts if z == "near")
+    assert "Jonathan Spencer" in near and "oh yeah lol" in near
+    assert "John Lacio" not in near and "Search inbox" not in near and "Projects" not in near
+    found = extract_names(parts)
+    fix = NameFix(found.words, near=found.near, tiers=found.tiers, closeness=found.closeness)
+    assert fix("Hey John, I'm on my way.") == "Hey Jon, I'm on my way."  # Jonathan goes by Jon
+
+
+def test_recruiter_focus_on_the_whole_page_gives_no_near_zone_rather_than_all_of_it():
+    # The logged miss: found=30 (near=30 title=0 page=0 far=0). Now: nothing is near.
+    parts, zones = zoned(recruiter_inline_window(focus_on="document"))
+    assert not any(z == "near" for z, _ in zones) and not any(z == "near" for z, _ in parts)
+    found = extract_names(parts)
+    assert found.zones["near"] == 0 and found.zones["page"] > 0
+
+
+def test_near_is_capped_at_half_the_window():
+    # 0 window > 1 page (focus, holds nearly everything) > 2 list > 3 item ...
+    nodes = [Node(-1, ["Window"]), Node(0, ["Page"]), Node(1, ["x" * 3000]), Node(1, ["y" * 100]), Node(0, ["z" * 100])]
+    assert not any(z == "near" for z, _ in node_zones(nodes, focus=1))
+    assert [z for z, _ in node_zones(nodes, focus=3)] == ["title", "page", "page", "near", "page"]
+
+
+# -- short forms: Jonathan goes by Jon --
+
+def short_form_fix(near_text, page_text=""):
+    found = extract_names([("near", near_text), ("page", page_text)])
+    return NameFix(found.words, near=found.near, tiers=found.tiers, closeness=found.closeness)
+
+
+@pytest.mark.parametrize(
+    "near, heard, wanted",
+    [
+        ("Jonathan Spencer\nJonathan Spencer sent a message", "Hey John, I'm on it.", "Hey Jon, I'm on it."),
+        ("Jonathon Price wrote", "Thanks John.", "Thanks Jon."),
+        ("Johnathan Reyes\nJohnathan Reyes sent a message", "Thanks Jon.", "Thanks John."),
+        ("Zachary Pike\nZachary Pike sent a message", "Thanks Zack.", "Thanks Zach."),
+        ("Geoffrey Lin\nGeoffrey Lin sent a message", "Thanks Jeff.", "Thanks Geoff."),
+        ("Kristopher Dale\nKristopher Dale sent a message", "Thanks Chris.", "Thanks Kris."),
+        # never expanded to the long name, and nicknames that are other names stay apart
+        ("Jonathan Spencer\nJonathan Spencer sent a message", "Thanks Jon.", "Thanks Jon."),
+        ("Jonathan Spencer\nJonathan Spencer sent a message", "Thanks Jonathan.", "Thanks Jonathan."),
+        ("William Hart\nWilliam Hart sent a message", "Thanks Bill.", "Thanks Bill."),
+    ],
+)
+def test_short_forms_of_a_near_long_name(near, heard, wanted):
+    assert short_form_fix(near, "John Lacio\nJohn Lacio. Message preview: hi")(heard) == wanted
+
+
+def test_short_forms_only_come_from_near_names():
+    fix = short_form_fix("Priya Raman\nPriya Raman sent a message", "Jonathan Spencer\nJonathan Spencer")
+    assert fix("Thanks John.") == "Thanks John." and fix.changed == 0

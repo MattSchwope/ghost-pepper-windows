@@ -2,6 +2,9 @@
 
 terms:    names and acronyms sent as keywords with every dictation, top of the list first
 replace:  "wrong": "Right" pairs, matched case-insensitively on whole words
+prefer:   "heard": "Wanted" default spellings for names with several (Kelly, Kelli). Used only on
+          capitalized words, and only when the focused window shows no spelling of that name
+          (Phase 2b, names.py).
 
 The file lives in the data folder, not the repo. The service re-reads it when it changes, so
 edits apply to the next dictation. The add-word hotkey and auto-learn append to it without
@@ -35,8 +38,13 @@ TEMPLATE = """\
 #
 # replace: fixes applied to the text after transcription, as "heard": "Wanted".
 #   Matching ignores case and only hits whole words, so "ts sci" fixes "TS SCI"
-#   but leaves "contests science" alone. Auto-learn adds lines here when you
-#   correct a pasted name (dictionary.auto_learn in config.yaml).
+#   but leaves "contests science" alone. Use it for acronyms and real mishearings.
+#   Auto-learn adds lines here when you correct a pasted word (dictionary.auto_learn).
+#
+# prefer: your usual spelling of a name that has several (Sean, Shawn; Kelly, Kelli),
+#   as "heard": "Wanted". It only changes capitalized words, so "kelly green" stays,
+#   and the window you dictate into wins: if it shows "Kelly", Kelly is pasted.
+#   Auto-learn saves corrected names here.
 
 terms:
   - Kavaliro
@@ -48,6 +56,8 @@ terms:
 replace:
   "cavaliro": "Kavaliro"
   "ts sci": "TS/SCI"
+
+prefer: {}
 """
 
 
@@ -55,6 +65,19 @@ replace:
 class Dictionary:
     terms: list[str] = field(default_factory=list)
     replace: dict[str, str] = field(default_factory=dict)
+    prefer: dict[str, str] = field(default_factory=dict)
+
+
+def _pairs(raw: dict[str, Any], key: str) -> dict[str, str]:
+    block = raw.get(key) or {}
+    if not isinstance(block, dict):
+        raise ValueError(f'{key}: must be "heard": "Wanted" lines')
+    pairs: dict[str, str] = {}
+    for wrong, right in block.items():
+        if wrong is None or right is None or not str(wrong).strip():
+            raise ValueError(f'{key}: every line needs both sides, as "heard": "Wanted"; got {wrong!r}: {right!r}')
+        pairs[str(wrong).strip()] = str(right)
+    return pairs
 
 
 def parse_dictionary(raw: Any) -> Dictionary:
@@ -67,15 +90,36 @@ def parse_dictionary(raw: Any) -> Dictionary:
         terms = [terms]
     if not isinstance(terms, list):
         raise ValueError("terms: must be a list, one term per line starting with '- '")
-    replace = raw.get("replace") or {}
-    if not isinstance(replace, dict):
-        raise ValueError('replace: must be "heard": "Wanted" lines')
-    pairs: dict[str, str] = {}
-    for wrong, right in replace.items():
-        if wrong is None or right is None or not str(wrong).strip():
-            raise ValueError(f'replace: every line needs both sides, as "heard": "Wanted"; got {wrong!r}: {right!r}')
-        pairs[str(wrong).strip()] = str(right)
-    return Dictionary(terms=[str(t).strip() for t in terms if t is not None and str(t).strip()], replace=pairs)
+    return Dictionary(
+        terms=[str(t).strip() for t in terms if t is not None and str(t).strip()],
+        replace=_pairs(raw, "replace"),
+        prefer=_pairs(raw, "prefer"),
+    )
+
+
+def dictionary_warnings(dictionary: Dictionary) -> list[str]:
+    """Entries that probably belong somewhere else, for gpw dictionary. Nothing is changed."""
+    from .names import adds_words, is_name_word, looks_like_name_variant
+
+    warnings = []
+    for wrong, right in dictionary.replace.items():
+        if looks_like_name_variant(wrong, right):
+            warnings.append(
+                f'replace: "{wrong}": "{right}" picks one spelling of a name that has several, so it misspells '
+                "everyone who spells it another way. Move it to prefer:, where the screen can overrule it."
+            )
+        elif adds_words(wrong, right):
+            warnings.append(
+                f'replace: "{wrong}": "{right}" adds words instead of fixing one, so every "{wrong}" grows. '
+                "Use a snippet for text you want inserted."
+            )
+    for wrong, right in dictionary.prefer.items():
+        if len(wrong.split()) != 1 or not is_name_word(right.strip()):
+            warnings.append(
+                f'prefer: "{wrong}": "{right}" is never used: prefer: works on one capitalized name, '
+                'such as "kelly": "Kelli". Use replace: for anything else.'
+            )
+    return warnings
 
 
 def keywords_for(dictionary: Dictionary, extra: list[str], limit: int) -> list[str]:
@@ -173,23 +217,23 @@ def insert_term(text: str, term: str) -> str:
     return _insert(text, "terms", f"  - {_quoted(term)}")
 
 
-def insert_replacement(text: str, wrong: str, right: str) -> str:
-    """Add a fix, or rewrite the line that already fixes `wrong`."""
+def insert_replacement(text: str, wrong: str, right: str, key: str = "replace") -> str:
+    """Add a fix to `key` (replace or prefer), or rewrite the line that already fixes `wrong`."""
     new_line = f"  {_quoted(wrong)}: {_quoted(right)}"
     lines = text.splitlines()
-    block = _find_block(lines, "replace")
+    block = _find_block(lines, key)
     if block is not None:
         start, after = block
-        key = " ".join(wrong.casefold().split())
+        heard = " ".join(wrong.casefold().split())
         for i in range(start + 1, after):
             try:
                 item = yaml.safe_load(lines[i])
             except yaml.YAMLError:
                 continue
-            if isinstance(item, dict) and len(item) == 1 and " ".join(str(next(iter(item))).casefold().split()) == key:
+            if isinstance(item, dict) and len(item) == 1 and " ".join(str(next(iter(item))).casefold().split()) == heard:
                 lines[i] = new_line
                 return "\n".join(lines) + "\n"
-    return _insert(text, "replace", new_line)
+    return _insert(text, key, new_line)
 
 
 class DictionaryStore:
@@ -236,8 +280,8 @@ class DictionaryStore:
             self._dictionary = parse_dictionary(yaml.safe_load(self.path.read_text(encoding="utf-8")))
             self.error = ""
             logger.info(
-                "Dictionary loaded: %s terms, %s fixes from %s",
-                len(self._dictionary.terms), len(self._dictionary.replace), self.path,
+                "Dictionary loaded: %s terms, %s fixes, %s preferred spellings from %s",
+                len(self._dictionary.terms), len(self._dictionary.replace), len(self._dictionary.prefer), self.path,
             )
         except (OSError, ValueError, yaml.YAMLError) as exc:
             # Keep the last good copy so a typo mid-edit does not break dictation.
@@ -263,6 +307,20 @@ class DictionaryStore:
             if current.get(wrong) == right:
                 return False
             self._edit_locked(lambda text: insert_replacement(text, wrong, right), lambda d: d.replace.get(wrong) == right)
+        return True
+
+    def add_preferred(self, heard: str, wanted: str) -> bool:
+        """Add or update a preferred name spelling. False if that exact one is already there."""
+        heard, wanted = " ".join(heard.split()).casefold(), wanted.strip()
+
+        def saved(d: Dictionary) -> bool:
+            return {" ".join(k.casefold().split()): v for k, v in d.prefer.items()}.get(heard) == wanted
+
+        with self._lock:
+            self._reload_locked()
+            if saved(self._dictionary):
+                return False
+            self._edit_locked(lambda text: insert_replacement(text, heard, wanted, key="prefer"), saved)
         return True
 
     def _edit_locked(self, edit, check) -> None:

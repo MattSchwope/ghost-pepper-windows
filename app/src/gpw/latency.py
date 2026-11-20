@@ -16,6 +16,8 @@ TARGET_SECONDS = 1.5
 TARGET_COUNT = 50
 TEN_SECOND_CLIPS = (7.0, 13.0)  # "a 10-second clip", with room for how long a key is really held
 SNIPPET_TARGET_SECONDS = 0.3  # from the transcript to the paste; OpenAI still has to hear "insert <name>"
+SCREEN_TARGET_SECONDS = 0.1  # Phase 2b: screen names on vs off
+SCREEN_WAIT_CAP = 0.08  # service.SCREEN_DEADLINE_SECONDS, measured from the key release
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -79,6 +81,9 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "cleanup": _median_of(rows, "cleanup"),
         }
 
+    spoken = [r for r in pasted if not r.get("snippet")]
+    screen_on = [r for r in spoken if r.get("screen") not in (None, "off")]
+    screen_off = [r for r in spoken if r.get("screen") in (None, "off")]
     checked = [r for r in pasted if "clipboard_restored" in r]
     local = [float(r["transcript_to_paste"]) for r in pasted if isinstance(r.get("transcript_to_paste"), (int, float))]
     return {
@@ -87,6 +92,16 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "median": percentile(local, 50),
             "slowest": max(local, default=None),
             "release_to_paste": _median_of([r for r in pasted if "transcript_to_paste" in r], "release_to_paste"),
+        },
+        "screen": {
+            "on": len(screen_on),
+            "off": len(screen_off),
+            "on_median": _median_of(screen_on, "release_to_paste"),
+            "off_median": _median_of(screen_off, "release_to_paste"),
+            "wait": _median_of(screen_on, "screen_wait"),
+            "slowest_wait": max((float(r["screen_wait"]) for r in screen_on if isinstance(r.get("screen_wait"), (int, float))), default=None),
+            "late": sum(1 for r in screen_on if r.get("screen") == "late"),
+            "fixed": sum(1 for r in screen_on if r.get("names_fixed")),
         },
         "pasted": len(pasted),
         "skipped": sum(1 for r in records if r.get("status") == "skipped"),
@@ -150,4 +165,23 @@ def format_report(summary: dict[str, Any], source: Path) -> str:
             f"Result: median {s['median']:.3f} s, slowest {s['slowest']:.3f} s, over {s['count']} -> {met}.",
             f"Release to paste for those: median {_fmt(s['release_to_paste'])}, which includes OpenAI hearing the phrase.",
         ]
+
+    sc = summary.get("screen") or {}
+    if sc.get("on"):
+        lines += [
+            f"\nPhase 2b target: median release-to-paste with screen_names on within {SCREEN_TARGET_SECONDS:g} s "
+            f"of off, over {TARGET_COUNT} dictations.",
+            f"Screen names on: median {_fmt(sc['on_median'])} over {sc['on']}   "
+            f"off: median {_fmt(sc['off_median'])} over {sc['off']}",
+            f"Time spent waiting for the screen at release: median {sc['wait']:.3f} s, slowest {sc['slowest_wait']:.3f} s"
+            f" (capped at {SCREEN_WAIT_CAP:g} s). Late reads: {sc['late']}. Dictations with a name respelled: {sc['fixed']}."
+            if sc.get("wait") is not None else "No screen wait times logged yet.",
+        ]
+        if sc["on_median"] is not None and sc["off_median"] is not None:
+            gap = sc["on_median"] - sc["off_median"]
+            met = "met" if gap <= SCREEN_TARGET_SECONDS else "missed"
+            short = [] if min(sc["on"], sc["off"]) >= TARGET_COUNT else [f"need {TARGET_COUNT} of each"]
+            lines.append(f"Result: on minus off = {gap:+.2f} s -> {met}" + (f" ({short[0]})." if short else "."))
+        else:
+            lines.append("Result: needs dictations with screen_names both on and off to compare.")
     return "\n".join(lines)
