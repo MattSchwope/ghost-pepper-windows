@@ -2,6 +2,12 @@
 ; Ghost Pepper Windows: pure helpers for the long-recording inbox in hotkey.ahk. No side effects, so
 ; app/tests/ahk/test_inbox_logic.ahk can test them. Uses JsonValue from dictation_logic.ahk.
 
+; The inbox folder from an /inbox/status answer, as a Windows path. The service sends forward
+; slashes (C:/GhostPepperWindows/inbox); turn them into backslashes, never drop them.
+InboxFolder(json) {
+    return StrReplace(JsonValue(json, "folder"), "/", "\")
+}
+
 ; The extra tray tooltip line while a recording is being processed, or "" when none is.
 ; The whole tooltip must stay under 128 characters, so long file names are shortened.
 InboxTipLine(json) {

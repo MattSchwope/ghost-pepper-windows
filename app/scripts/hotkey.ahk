@@ -853,7 +853,7 @@ PollInbox() {
     try r := Http("POST", "/inbox/status", "", 1500)
     if (r = "" || r.status != 200)
         return
-    InboxDir := StrReplace(JsonValue(r.body, "folder"), "/", "")
+    InboxDir := InboxFolder(r.body)
     line := InboxTipLine(r.body)
     for notice in InboxNotices(r.body, InboxSeen) {
         ToastTarget := notice.target

@@ -24,6 +24,10 @@ Titles(notices) {
     return out
 }
 
+Check("inbox folder as a Windows path", InboxFolder('{"folder": "C:/GhostPepperWindows/inbox"}'),
+    "C:\GhostPepperWindows\inbox")
+Check("no folder", InboxFolder('{"ok": false}'), "")
+
 Check("idle: no tooltip line", InboxTipLine('{"processing": "", "queued": 0}'), "")
 Check("busy", InboxTipLine('{"processing": "talk1.m4a", "step": "transcribing, batch 2 of 6", "queued": 0}'),
     "Recording: talk1.m4a, transcribing, batch 2 of 6")
