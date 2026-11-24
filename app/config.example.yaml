@@ -54,15 +54,33 @@ dictation:
   sounds: true             # start and stop beeps
   paste_restore_ms: 250    # wait this long after pasting before putting the old clipboard back
   prewarm_connection: true # connect to OpenAI on key down, so the upload skips the handshake
+  screen_names: true       # spell names the way the window you dictate into shows them (Sean or
+                           # Shawn, Kelly or Kelli). Read through Windows UI Automation while the
+                           # mic records. Only the names go to OpenAI, as spelling hints; the window
+                           # text is never saved, logged or sent.
+  screen_names_skip:       # never read these. ".exe" entries match the program; anything else
+                           # matches a word in the window title, such as "Chase" for a bank site.
+    - 1Password.exe
+    - Bitwarden.exe
+    - Dashlane.exe
+    - KeePass.exe
+    - KeePassXC.exe
+    - Keeper.exe
+    - LastPass.exe
+    - RoboForm.exe
+    - CredentialUIBroker.exe
+    - LogonUI.exe
 
 # Personal dictionary: terms sent as spelling hints, plus "heard": "Wanted" fixes.
 # `gpw dictionary` shows where it is and whether it has errors.
 dictionary:
   path: null               # null = <data_dir>/dictionary.yaml, created with examples on first start
-  max_keywords: 100        # terms sent per dictation, top of the list first (the API cap is untested)
+  max_keywords: 100        # hints sent per dictation: names from the screen first, then terms, top of
+                           # the list first (the API cap is untested)
   auto_learn: true         # experimental: after a paste, watch the text field for learn_seconds; if you
-                           # fix a name or acronym (cavaliro -> Kavaliro), save that fix. Reads the
-                           # field through Windows UI Automation; nothing leaves the PC.
+                           # fix a name or acronym (cavaliro -> Kavaliro), save that fix. A respelled
+                           # name (Kelly -> Kelli) goes to prefer: instead. Reads the field through
+                           # Windows UI Automation; nothing leaves the PC.
   learn_seconds: 15
 
 # Snippets: say "insert <name>" as the whole dictation to paste canned text exactly as written.
