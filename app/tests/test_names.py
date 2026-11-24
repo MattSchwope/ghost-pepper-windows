@@ -144,6 +144,13 @@ def test_only_capitalized_words_change_and_sentence_start_words_stay():
     assert fix(text) == "Mark the date. Will you ask Marc? kelly green, mark it. Then Wil can go."
 
 
+def test_weekdays_and_months_keep_their_spelling_mid_sentence():
+    # "Frid" on a Teams screen cut a dictated "Friday" short.
+    fix = NameFix({"Frid", "Mond", "Janu"})
+    text = "Ali is good to go for Friday. Monday works, or January."
+    assert fix(text) == text and fix.changed == 0
+
+
 def test_acronyms_and_exact_matches_are_untouched():
     fix = NameFix({"Sean", "SOCOM"})
     assert fix("SEAN and SOCOM and Sean.") == "SEAN and SOCOM and Sean."

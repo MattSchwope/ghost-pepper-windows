@@ -484,7 +484,10 @@ class NameFix:
 
     def spelling(self, word: str, at_sentence_start: bool) -> str | None:
         """The spelling to use for one capitalized transcript word, or None to leave it."""
-        if len(_fold(word)) < 2 or (at_sentence_start and is_common(word)):
+        if len(_fold(word)) < 2 or (is_common(word) and (at_sentence_start or not known_name(word))):
+            # A common word that is never a first name keeps its spelling anywhere: Whisper capitalizes
+            # Friday mid-sentence, and a "Frid" on screen must not cut it short. Will and Mark still
+            # change mid-sentence, where the capital marks them as names.
             return None
         matches = {s for s in self._near_words if sounds_alike(word, s)}
         if not matches:
